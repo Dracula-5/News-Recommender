@@ -2,8 +2,9 @@
 #
 # Deploy: on Render, "New +" -> "Blueprint" -> connect this repo. Render
 # reads this file and pre-fills everything below; you only need to fill in
-# NEUROFEED_CORS_ORIGINS with your actual Netlify URL once you have it
-# (Render will prompt for any envVar with no `value`, i.e. sync: false).
+# NEUROFEED_CORS_ORIGINS with your actual frontend URL (Vercel/Netlify/etc.)
+# once you have it (Render will prompt for any envVar with no `value`, i.e.
+# sync: false).
 #
 # Not using a Blueprint? These are the same values to paste into a manually
 # created Web Service — see the "Root Directory" / "Build Command" /
@@ -28,4 +29,6 @@ services:
       - key: NEUROFEED_ENABLE_WEBCAM_ATTENTION
         value: "false"
       - key: NEUROFEED_CORS_ORIGINS
-        sync: false # fill in with your Netlify URL, e.g. https://your-site.netlify.app
+        sync: false # fill in with your frontend URL, e.g. https://your-app.vercel.app
+      - key: NEUROFEED_NEWS_API_KEY
+        sync: false # optional — free key at https://newsapi.org; blank disables the Live News bulletin

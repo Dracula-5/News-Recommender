@@ -21,4 +21,4 @@
     # Mirrors backend/main.py's _SECURITY_HEADERS CSP, except connect-src
     # additionally allows the Render backend (a different origin now that
     # the frontend is split out to Netlify).
-    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://YOUR-RENDER-SERVICE.onrender.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://YOUR-RENDER-SERVICE.onrender.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
