@@ -225,6 +225,16 @@ honestly-reported) proxy for within-session learning.
 - **Keyboard shortcuts** — `L` / `D` / `N` mirror the Useful / Not
   interested / Next article buttons, disabled while typing in any field
   or with the settings panel open.
+- **Live News** (`GET /news/live`, `live_news.py`) — a "Live News"
+  postcard row of real articles pulled from [NewsAPI.org](https://newsapi.org),
+  each linking out to its original source. Off by default
+  (`NEUROFEED_NEWS_API_KEY` unset → `configured: false`, the frontend
+  hides the row entirely, no error). Deliberately **not** part of the
+  personalized/trained recommend() pipeline — see "Known limitations" —
+  refreshed at most every 90 minutes (`NEUROFEED_NEWS_LIVE_CACHE_TTL_SECONDS`)
+  to stay well under the free tier's 100-requests/day cap, and persisted
+  into the same `news` table (tagged `is_live=1`) so a redeploy doesn't
+  lose them until the next refresh.
 - **Sliding card transitions, toasts, a loading bar** — the feed
   animates the previous article out and the next one in on every
   advance (CSS transform/opacity, no JS animation library); like/dislike
@@ -268,15 +278,17 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-## Deploying to Render + Netlify
+## Deploying to Render + Netlify/Vercel
 
 Splitting frontend and backend across two hosts is a different shape than
 the Docker/local setup above — those serve the frontend *from* the
 backend (`app.mount("/app", ...)` in `main.py`). Split across two
 origins, the frontend needs to know the backend's URL and the backend
-needs to allow the frontend's origin. `render.yaml` and `netlify.toml` at
-the repo root pre-fill almost everything; two edits still need your
-actual URLs, which don't exist until you've deployed once.
+needs to allow the frontend's origin. `render.yaml` and
+`netlify.toml`/`final/frontend/vercel.json` at the repo root pre-fill
+almost everything; two edits still need your actual URLs, which don't
+exist until you've deployed once. Netlify and Vercel are interchangeable
+here — same static files, same edits, pick whichever you prefer.
 
 ### 1. Backend on Render
 
@@ -319,11 +331,10 @@ A couple of things worth knowing before you deploy, not after:
   the build times out, the Starter tier's extra memory is the first thing
   to try before debugging further.
 
-### 2. Frontend on Netlify
+### 2. Frontend on Netlify or Vercel
 
-**Via the dashboard** — Netlify → **Add new site** → **Import an existing
-project** → connect this repo. It reads `netlify.toml` and needs nothing
-filled in manually:
+**Netlify** — **Add new site** → **Import an existing project** → connect
+this repo. It reads `netlify.toml` and needs nothing filled in manually:
 
 | Field | Value |
 |---|---|
@@ -331,32 +342,47 @@ filled in manually:
 | Build command | *(none — static files, no build step)* |
 | Publish directory | `final/frontend` |
 
-Before or after the first deploy, make the two edits that depend on your
-Render URL from step 1:
+**Vercel** — **Add New...** → **Project** → connect this repo, then set:
+
+| Field | Value |
+|---|---|
+| Root Directory | `final/frontend` |
+| Framework Preset | Other |
+| Build Command | *(none — static files, no build step)* |
+| Output Directory | *(leave default)* |
+
+`final/frontend/vercel.json` (picked up automatically once Root Directory
+points inside it) carries the same security headers/CSP as
+`netlify.toml`.
+
+Whichever you pick, before or after the first deploy make the two edits
+that depend on your Render URL from step 1:
 
 1. **`final/frontend/config.js`** — replace
    `https://YOUR-RENDER-SERVICE.onrender.com` with your actual Render URL.
-2. **`netlify.toml`** — same replacement, inside the `connect-src` value
-   of the `Content-Security-Policy` header (without it, the CSP blocks
-   the frontend from calling the backend at all — this isn't optional).
+2. **`netlify.toml`** (Netlify) or **`final/frontend/vercel.json`**
+   (Vercel) — same replacement, inside the `connect-src` value of the
+   `Content-Security-Policy` header (without it, the CSP blocks the
+   frontend from calling the backend at all — this isn't optional).
 
-Commit both, push, Netlify redeploys automatically. Note the resulting
-Netlify URL (`https://<your-site-name>.netlify.app`) for step 3.
+Commit both, push, your host redeploys automatically. Note the resulting
+frontend URL (`https://<your-site>.netlify.app` or
+`https://<your-project>.vercel.app`) for step 3.
 
 ### 3. Close the loop: CORS
 
 Back on Render, set the `NEUROFEED_CORS_ORIGINS` env var you left blank
-in step 1 to your Netlify URL (exact origin, no trailing slash, e.g.
-`https://your-site-name.netlify.app`), then redeploy the backend. Until
-this is set, the backend still works standalone (`curl`, `/docs`,
-Postman) — only browser requests *from the Netlify origin* are rejected
-by CORS in the meantime.
+in step 1 to your frontend's URL (exact origin, no trailing slash, e.g.
+`https://your-app.vercel.app`), then redeploy the backend. Until this is
+set, the backend still works standalone (`curl`, `/docs`, Postman) — only
+browser requests *from the frontend's origin* are rejected by CORS in the
+meantime.
 
 ### Sanity-checking the split deployment
 
 ```bash
 curl https://<your-render-url>/health          # backend up, DB seeded
-curl -I https://<your-netlify-url>/            # frontend serving, check headers
+curl -I https://<your-frontend-url>/           # frontend serving, check headers
 ```
 
 Then open the Netlify URL, sign up (or continue as guest), and confirm a
@@ -395,6 +421,8 @@ Full interactive docs at `/docs` once the server is running.
 │   ├── nlp_engine.py            BM25 + TF-IDF + LSA ensemble retrieval
 │   ├── reranking.py             MMR diversity re-ranking
 │   ├── evaluation.py            Simulated-user offline evaluation harness
+│   ├── mood_signals.py          Mood→category affinity prior + time-decay
+│   ├── live_news.py             Live News bulletin ingestion (NewsAPI.org)
 │   ├── webcam_attention.py      OpenCV + MediaPipe attention pipeline
 │   ├── auth.py                  Token-based auth (PBKDF2-HMAC-SHA256)
 │   ├── login_throttle.py        Per-account login brute-force lockout
@@ -403,7 +431,8 @@ Full interactive docs at `/docs` once the server is running.
 │   ├── cache.py / ratelimit.py / metrics.py / logging_config.py
 │   ├── scripts/seed_demo_data.py  Synthetic dataset generator
 │   ├── frontend/                 Editorial-style feed UI (vanilla HTML/CSS/JS)
-│   │   └── config.js             Backend API base URL — the one line split deployment edits
+│   │   ├── config.js             Backend API base URL — the one line split deployment edits
+│   │   └── vercel.json           Vercel headers/CSP (Netlify's equivalent: netlify.toml)
 │   ├── tests/                    pytest suite
 │   └── Dockerfile / docker-compose.yml
 ├── render.yaml                   Render Blueprint (backend)
@@ -437,3 +466,14 @@ Full interactive docs at `/docs` once the server is running.
   falls back to reinitializing it on next load rather than crashing — a
   disclosed trade-off (lost training progress for pre-existing users, on
   a change that couldn't otherwise be made at all), not a silent one.
+- Live News articles (`is_live=1` in the `news` table) are deliberately
+  excluded from `recommend()`'s candidate pool and `get_trending()`'s
+  sample picker, not scored or personalized at all — they only ever
+  appear in the dedicated bulletin row. Folding them into the trained
+  pipeline is a bigger, separate decision than fetching and displaying
+  them: the NLP engine's LSA/BM25/TF-IDF fit happens once at the first
+  `/recommend` call, so articles added afterward wouldn't have real
+  content vectors and MMR would silently fall back to its
+  same-category-similarity heuristic for them — degrading gracefully
+  rather than crashing, but quietly lower-quality, which is exactly the
+  kind of thing this project tries not to ship silently.
