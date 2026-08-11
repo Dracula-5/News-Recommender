@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from database import DB_PATH, db_connect, import_csvs, init_db
+from cache import TTLCache
+from config import get_settings
+from logging_config import configure_logging, get_logger
+from metrics import METRICS
+from ratelimit import RateLimiter
+from database import db_connect, import_csvs, init_db
 from recommender import NewsRecommender
 from utils import category_preference_from_text, clamp
 from webcam_attention import (
@@ -29,6 +34,12 @@ from webcam_attention import (
 )
 from auth import init_auth_db, signup_user, login_user, verify_token, get_user_by_id
 
+settings = get_settings()
+configure_logging(settings.log_level)
+logger = get_logger(__name__)
+
+DB_PATH = settings.db_path
+
 # ─────────────────────────────────────────────
 #  WARMUP (Performance Boost)
 # ─────────────────────────────────────────────
@@ -38,7 +49,7 @@ async def _warmup():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _warmup_sync)
     except Exception:
-        pass
+        logger.exception("Warmup failed")
 
 
 def _warmup_sync():
@@ -53,30 +64,29 @@ def _warmup_sync():
 
 
 # ─────────────────────────────────────────────
-#  APP LIFECYCLE (FIXED WEBCAM START)
+#  APP LIFECYCLE
 # ─────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Starting backend...")
+    logger.info("Starting backend (env=%s, db=%s)", settings.env, DB_PATH)
 
     init_db(DB_PATH)
     init_auth_db()
 
-    enable_webcam = os.getenv("ENABLE_WEBCAM_ATTENTION", "0").lower() in ("1", "true", "yes")
-    if enable_webcam:
+    if settings.enable_webcam_attention:
         try:
             result = start_background_attention()
-            print("📷 Webcam:", result)
-        except Exception as e:
-            print("❌ Webcam failed:", e)
+            logger.info("Webcam attention started: %s", result)
+        except Exception:
+            logger.exception("Webcam attention failed to start")
     else:
-        print("⚠️ Webcam attention disabled. Set ENABLE_WEBCAM_ATTENTION=1 to enable.")
+        logger.info("Webcam attention disabled (NEUROFEED_ENABLE_WEBCAM_ATTENTION=false)")
 
     asyncio.ensure_future(_warmup())
     yield
 
-    print("🛑 Shutting down...")
+    logger.info("Shutting down")
     stop_background_attention()
 
 
@@ -92,11 +102,48 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# In-memory TTL cache for hot, cheap-to-stale read paths (categories, users
+# list). Swap for Redis behind the same get/set interface if this ever runs
+# as more than one process — see cache.py.
+cache = TTLCache(default_ttl=settings.cache_ttl_seconds)
+
+# Simple in-memory sliding-window rate limiter, keyed by client IP. Good
+# enough for a single-process deployment; a multi-instance deployment would
+# back this with Redis (the interface is intentionally the same shape).
+rate_limiter = RateLimiter(
+    max_requests=settings.rate_limit_requests,
+    window_seconds=settings.rate_limit_window_seconds,
+)
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    """Rate limiting + request logging + latency metrics in one pass."""
+    client_ip = request.client.host if request.client else "unknown"
+
+    if not rate_limiter.allow(client_ip):
+        METRICS.inc("http_requests_rate_limited_total")
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        METRICS.inc("http_requests_errors_total")
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        raise
+    duration_ms = (time.perf_counter() - start) * 1000
+
+    METRICS.inc("http_requests_total")
+    METRICS.observe("http_request_duration_ms", duration_ms, labels={"path": request.url.path})
+    logger.info("%s %s -> %s (%.1fms)", request.method, request.url.path, response.status_code, duration_ms)
+    return response
 
 # ─────────────────────────────────────────────
 #  FRONTEND SERVE
@@ -253,6 +300,12 @@ def health():
     }
 
 
+@app.get("/metrics")
+def metrics():
+    """Prometheus-format request counters/latency — scrape this or curl it directly."""
+    return PlainTextResponse(METRICS.render_prometheus(), media_type="text/plain; version=0.0.4")
+
+
 @app.post("/import_data")
 def import_data(force: bool = False):
     return import_csvs(DB_PATH, force=force)
@@ -260,16 +313,20 @@ def import_data(force: bool = False):
 
 @app.get("/categories")
 def categories():
-    return {"categories": engine.categories()}
+    # Rarely changes within a run — cheap to cache for the full TTL.
+    return {"categories": cache.get_or_set("categories", engine.categories)}
 
 
 @app.get("/users")
 def users():
-    with db_connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT user_id FROM users ORDER BY updated_at DESC LIMIT 50"
-        ).fetchall()
-    return {"users": [row["user_id"] for row in rows]}
+    def _fetch():
+        with db_connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM users ORDER BY updated_at DESC LIMIT 50"
+            ).fetchall()
+        return [row["user_id"] for row in rows]
+
+    return {"users": cache.get_or_set("users:recent", _fetch)}
 
 
 @app.get("/user/{user_id}")
@@ -381,7 +438,8 @@ def signup(payload: SignupPayload):
         'time_available': 10,
         'exploration_preference': 0.25
     })
-    
+    cache.invalidate("users:recent")
+
     return {
         'user_id': result['user_id'],
         'username': result['username'],
@@ -451,7 +509,9 @@ def verify_auth_token(token: str = None):
 
 @app.post("/onboard")
 def onboard(payload: OnboardPayload):
-    return engine.onboard_user(as_payload(payload))
+    result = engine.onboard_user(as_payload(payload))
+    cache.invalidate("users:recent")
+    return result
 
 
 @app.post("/recommend")

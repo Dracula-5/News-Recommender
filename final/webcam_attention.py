@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import platform
 import threading
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -272,7 +275,7 @@ def _draw_overlays(frame: np.ndarray, face_landmarks, x_min, y_min, x_max, y_max
 
 def _attention_loop(camera_index: int, show_window: bool):
     global LATEST, LATEST_FRAME
-    print("🚀 Camera thread started")
+    logger.info("Camera thread started")
     mp_face_mesh = mp.solutions.face_mesh
 
     face_mesh = mp.solutions.face_mesh.FaceMesh(
@@ -289,7 +292,7 @@ def _attention_loop(camera_index: int, show_window: bool):
         if cap.isOpened():
             ret, _ = cap.read()
             if ret:
-                print("✅ Camera opened successfully")
+                logger.info("Camera opened successfully")
                 break
             cap.release()
         time.sleep(0.4)
@@ -460,7 +463,7 @@ def _attention_loop(camera_index: int, show_window: bool):
             with _SNAPSHOT_LOCK:
                 globals()["LATEST_FRAME"] = buf.tobytes()
         else:
-            print("❌ Frame encoding failed")
+            logger.warning("Frame encoding failed")
 
         if show_window:
             cv2.imshow("Attention Monitor", frame)
