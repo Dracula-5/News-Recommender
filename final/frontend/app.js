@@ -478,6 +478,15 @@ document.addEventListener("click", () => {
 if (logoutLink) {
   logoutLink.addEventListener("click", (e) => {
     e.preventDefault();
+    // Best-effort server-side revoke so the token can't keep working if
+    // it leaks after this — don't block navigation on it either way.
+    const token = localStorage.getItem('token');
+    if (token) {
+      fetch(`${api}/auth/logout`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}` },
+      }).catch(() => {});
+    }
     localStorage.clear();
     window.location.href = "login.html";
   });

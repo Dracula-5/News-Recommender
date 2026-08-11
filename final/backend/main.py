@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,7 +32,10 @@ from webcam_attention import (
     start_background_attention,
     stop_background_attention,
 )
-from auth import init_auth_db, signup_user, login_user, verify_token, get_user_by_id
+from auth import (
+    init_auth_db, signup_user, login_user, verify_token,
+    get_user_by_id, revoke_token,
+)
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -164,6 +167,40 @@ def as_payload(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    return authorization.split(" ", 1)[1].strip() or None
+
+
+def authorize_user_id(user_id: str | None, authorization: str | None = Header(None)) -> None:
+    """
+    Guard against one authenticated user acting as another user_id.
+
+    Every per-user endpoint (recommend/feedback/profile/etc.) takes
+    `user_id` as plain data in the request body or path — nothing
+    previously checked it against who the caller's token actually says
+    they are, despite the frontend dutifully sending `Authorization:
+    Bearer <token>` on every request. That means any authenticated user
+    could read or mutate *any other* user's profile, feed, and feedback
+    history just by putting a different user_id in the request — a
+    straightforward IDOR (insecure direct object reference).
+
+    Guest mode is intentionally tokenless (see frontend/login.html), so a
+    request with no Authorization header at all is let through unchanged
+    — this only rejects the case where a *valid token for a different
+    user* is presented, which is unambiguously wrong in every case.
+    """
+    token = _bearer_token(authorization)
+    if token is None:
+        return
+    result = verify_token(token)
+    if not result.get("valid"):
+        raise HTTPException(401, result.get("message", "Invalid or expired token"))
+    if user_id and result["user_id"] != user_id:
+        raise HTTPException(403, "Token does not authorize access to this user_id")
 
 
 # ─────────────────────────────────────────────
@@ -330,7 +367,8 @@ def users():
 
 
 @app.get("/user/{user_id}")
-def user_info(user_id: str):
+def user_info(user_id: str, authorization: str | None = Header(None)):
+    authorize_user_id(user_id, authorization)
     with db_connect(DB_PATH) as conn:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     if not row:
@@ -339,11 +377,12 @@ def user_info(user_id: str):
 
 
 @app.patch("/user/{user_id}/interests")
-def update_interests(user_id: str, payload: InterestsUpdatePayload):
+def update_interests(user_id: str, payload: InterestsUpdatePayload, authorization: str | None = Header(None)):
     """
     Update a user's interests, mood, and/or exploration preference after onboarding.
     Re-seeds category preferences from the new interest text.
     """
+    authorize_user_id(user_id, authorization)
     with db_connect(DB_PATH) as conn:
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if row is None:
@@ -503,19 +542,37 @@ def verify_auth_token(token: str = None):
     return {'valid': True, 'user_id': result['user_id']}
 
 
+@app.post("/auth/logout")
+def logout(authorization: str | None = Header(None)):
+    """
+    Server-side logout: invalidates the presented token immediately,
+    instead of relying purely on the client dropping it from
+    localStorage. A logged-out token can no longer pass `verify_token`
+    or `authorize_user_id`, even if it leaked or is still cached
+    somewhere client-side.
+    """
+    token = _bearer_token(authorization)
+    if not token:
+        raise HTTPException(400, "No bearer token in Authorization header")
+    revoked = revoke_token(token)
+    return {"revoked": revoked}
+
+
 # ─────────────────────────────────────────────
 #  CORE RL ROUTES
 # ─────────────────────────────────────────────
 
 @app.post("/onboard")
-def onboard(payload: OnboardPayload):
+def onboard(payload: OnboardPayload, authorization: str | None = Header(None)):
+    authorize_user_id(payload.user_id, authorization)
     result = engine.onboard_user(as_payload(payload))
     cache.invalidate("users:recent")
     return result
 
 
 @app.post("/recommend")
-def recommend(payload: RecommendPayload):
+def recommend(payload: RecommendPayload, authorization: str | None = Header(None)):
+    authorize_user_id(payload.user_id, authorization)
     return engine.recommend(
         payload.user_id,
         payload.k,
@@ -526,17 +583,20 @@ def recommend(payload: RecommendPayload):
 
 
 @app.post("/feedback")
-def feedback(payload: FeedbackPayload):
+def feedback(payload: FeedbackPayload, authorization: str | None = Header(None)):
+    authorize_user_id(payload.user_id, authorization)
     return engine.feedback(as_payload(payload))
 
 
 @app.post("/poll_feedback")
-def poll_feedback(payload: PollFeedbackPayload):
+def poll_feedback(payload: PollFeedbackPayload, authorization: str | None = Header(None)):
+    authorize_user_id(payload.user_id, authorization)
     return engine.poll_feedback(payload.user_id, payload.news_id, payload.liked)
 
 
 @app.post("/update_model")
-def update_model(payload: UpdatePayload):
+def update_model(payload: UpdatePayload, authorization: str | None = Header(None)):
+    authorize_user_id(payload.user_id, authorization)
     return engine.update_model(payload.user_id)
 
 
@@ -644,6 +704,51 @@ def graph_top_categories(user_id: str, n: int = 5):
         if cat in cats
     ]
     return {"user_id": user_id, "top_categories": out}
+
+
+@app.get("/graph/related/{user_id}/{category}")
+def graph_related_categories(user_id: str, category: str, n: int = 3):
+    """
+    Categories that co-occur with `category` in the user's like history —
+    the knowledge graph's co-interest edges (time-decayed, same as node
+    scores). Falls back to top-interest categories if `category` has no
+    edges yet. Used by the recommender to steer exploration toward related
+    interests instead of picking a random unrelated category.
+    """
+    related = engine._graph.get_co_interest_categories(user_id, category, n=n)
+    return {"user_id": user_id, "category": category, "related_categories": related}
+
+
+# ─────────────────────────────────────────────
+#  HISTORY & MEMORY
+# ─────────────────────────────────────────────
+
+@app.get("/history/{user_id}")
+def history(user_id: str, limit: int = 20, offset: int = 0, authorization: str | None = Header(None)):
+    """
+    Paginated reading history — every article this user has given
+    feedback on, newest first, with headline/category/liked/dwell-time.
+    `user_memory` (used internally to exclude already-fed-back articles
+    from future candidate pools) only retains the last 100 entries as a
+    plain exclusion list; this reads the full `interactions` log instead,
+    which is the actual source of truth for "what has this user read."
+    """
+    authorize_user_id(user_id, authorization)
+    return engine.get_history(user_id, limit=limit, offset=offset)
+
+
+@app.get("/memory/summary/{user_id}")
+def memory_summary(user_id: str, top_n: int = 5, authorization: str | None = Header(None)):
+    """
+    Human-readable digest of the knowledge graph: top interests, which
+    ones are trending up or fading relative to this user's long-run
+    preference, and categories the graph has learned they tend to like
+    together. Same underlying signal the scorer already uses
+    (graph_score / cat_pref / co-interest edges) — surfaced here in a form
+    meant to be read, not just multiplied into a score.
+    """
+    authorize_user_id(user_id, authorization)
+    return engine.get_memory_summary(user_id, top_n=top_n)
 
 
 # ─────────────────────────────────────────────

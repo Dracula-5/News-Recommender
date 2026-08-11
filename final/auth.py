@@ -7,12 +7,32 @@ Authentication module for NeuroFeed
 
 import sqlite3
 import hashlib
+import hmac
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 
-AUTH_DB_PATH = Path(__file__).resolve().parent / "data" / "auth.sqlite"
+from config import get_settings
+
+# Previously a hardcoded constant with no way to override it — every test
+# that touched signup/login was silently reading and writing the real dev
+# auth.sqlite (the isolated-test-DB setup in tests/conftest.py only ever
+# covered the main news_recommender.sqlite via NEUROFEED_DB_PATH). Deriving
+# this from settings means NEUROFEED_AUTH_DB_PATH actually isolates it.
+AUTH_DB_PATH: Path = get_settings().auth_db_path
+
+
+def _utcnow() -> datetime:
+    """
+    Naive UTC datetime (matches what's already stored/compared here).
+    `datetime.utcnow()` is deprecated as of 3.12; this is its non-deprecated
+    equivalent, not a behavior change — the whole module compares these as
+    naive datetimes, so switching to timezone-aware ones everywhere would
+    be a larger, riskier change than fixing the deprecation warrants.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 def init_auth_db():
     """Initialize authentication database"""
@@ -89,7 +109,11 @@ def verify_password(password: str, password_hash: str) -> bool:
             salt.encode('utf-8'),
             100000
         )
-        return password_check.hex() == stored_hash
+        # Constant-time comparison — a plain `==` on strings short-circuits
+        # on the first mismatched byte, which leaks a timing signal an
+        # attacker can use to recover the hash (and thus brute-force the
+        # password) byte-by-byte instead of needing the whole keyspace.
+        return hmac.compare_digest(password_check.hex(), stored_hash)
     except Exception:
         return False
 
@@ -170,12 +194,12 @@ def signup_user(email: str, password: str, username: str = None) -> dict:
         """, (email, username, password_hash, user_id))
         
         # Insert token
-        expires_at = datetime.utcnow() + timedelta(days=30)
+        expires_at = _utcnow() + timedelta(days=30)
         cursor.execute("""
         INSERT INTO auth_tokens (user_id, token, expires_at)
         VALUES (?, ?, ?)
-        """, (user_id, token, expires_at))
-        
+        """, (user_id, token, expires_at.isoformat(sep=" ")))
+
         conn.commit()
         conn.close()
         
@@ -233,11 +257,11 @@ def login_user(email: str, password: str) -> dict:
         cursor = conn.cursor()
         
         # Insert new token
-        expires_at = datetime.utcnow() + timedelta(days=30)
+        expires_at = _utcnow() + timedelta(days=30)
         cursor.execute("""
         INSERT INTO auth_tokens (user_id, token, expires_at)
         VALUES (?, ?, ?)
-        """, (user['user_id'], token, expires_at))
+        """, (user['user_id'], token, expires_at.isoformat(sep=" ")))
         
         conn.commit()
         conn.close()
@@ -273,10 +297,40 @@ def verify_token(token: str) -> dict:
         return {'valid': False}
     
     expires_at = datetime.fromisoformat(token_row['expires_at'])
-    if datetime.utcnow() > expires_at:
+    if _utcnow() > expires_at:
         return {'valid': False, 'message': 'Token expired'}
     
     return {'valid': True, 'user_id': token_row['user_id']}
+
+
+def revoke_token(token: str) -> bool:
+    """
+    Invalidate a single token (server-side logout).
+
+    Before this, "logging out" was purely a client-side
+    `localStorage.clear()` — the token itself stayed marked valid in
+    auth_tokens until its 30-day expiry, so a token that had leaked (XSS,
+    a shared/public machine, a synced browser profile) kept working long
+    after the user thought they'd logged out, with no way to cut it off.
+    """
+    conn = sqlite3.connect(AUTH_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE auth_tokens SET is_valid = 0 WHERE token = ?", (token,))
+    revoked = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return revoked
+
+
+def revoke_all_tokens_for_user(user_id: str) -> int:
+    """Invalidate every token for a user — e.g. after a password change."""
+    conn = sqlite3.connect(AUTH_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE auth_tokens SET is_valid = 0 WHERE user_id = ? AND is_valid = 1", (user_id,))
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
 
 
 def get_user_by_id(user_id: str) -> dict:
