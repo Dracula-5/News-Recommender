@@ -66,7 +66,7 @@ actually make a production recommender hard:
 
 | Technique | Where | What it does |
 |---|---|---|
-| Dueling Double DQN | `ddqn_agent.py` | Learns per-category Q-values from a 10-D state (attention, interaction score, recency, category preference, exploration signal, graph score, TS reward, cyclical time-of-day, session like-rate) |
+| Dueling Double DQN | `ddqn_agent.py` | Learns per-category Q-values from an 11-D state (attention, interaction score, recency, category preference, exploration signal, graph score, TS reward, cyclical time-of-day, session like-rate, mood affinity) |
 | Thompson Sampling + UCB1 | `rl_policies.py` | `HybridPolicy` blends both bandits with the DDQN, so category selection doesn't rely on Q-values alone while they're still noisy |
 | Time-decayed interest graph | `graph_memory.py` | NetworkX graph of user↔category edges with exponential decay (1-week half-life) — captures "used to like this, drifting away" without a full retrain |
 | BM25 + TF-IDF + LSA ensemble | `nlp_engine.py` | 40/40/20 blended retrieval; LSA (64-dim truncated SVD) also doubles as the content-embedding space for diversity re-ranking |
@@ -76,6 +76,7 @@ actually make a production recommender hard:
 | **Discounted bandits** | `rl_policies.py` | Thompson Sampling and UCB1 both discount old evidence (configurable decay, default 0.995) — plain bandit math assumes a stationary reward distribution, but a user's taste for a category drifts over weeks; without this, a few hundred interactions make the posterior nearly immovable |
 | **Reading history & memory summary** | `recommender.py` | `get_history()` — the full interactions log, paginated, not just the 100-entry seen-exclusion list. `get_memory_summary()` — a human-readable digest (top/rising/fading interests, related categories) of the same signal the scorer consumes as opaque numbers |
 | **Trending** | `recommender.py` | Site-wide (not personalized) top categories by `category_stats.trending_score` with a sample article each — the same trending signal the "trending" candidate pool already uses internally, surfaced directly for a always-something-to-read dashboard row |
+| **Mood-aware scoring** | `mood_signals.py`, `recommender.py`, `utils.py` | A heuristic mood↔category affinity prior (curious→science, relaxed→lifestyle, etc.) that decays on a 4-hour half-life — much faster than the graph's 1-week interest decay, since a mood is a momentary context signal, not a stable preference. Feeds the pipeline twice: as the DDQN's 11th state dimension (so the network can learn *this* user's actual mood associations, which may diverge from the generic table) and as a cold-start-weighted scoring term (`weights["mood"]`, available immediately, no training needed). "Latest mood wins" — a mood in a `/recommend` call that differs from what's stored overwrites it with a fresh timestamp; the frontend's mood picker and the settings-panel mood field both write through this path. `compute_reward()` also takes a small mood-congruence shaping term: liking a mood-congruent article earns a touch more reward, disliking one costs a touch more — reinforcing when the heuristic prior was right, without overriding the primary like/dislike signal |
 | HITL feedback loop | `recommender.py`, `webcam_attention.py` | Every like/dislike/poll/dwell-time/attention-score event updates SQLite, category preferences, the replay buffer, and DDQN weights immediately — state/next_state are built to cleanly bracket each transition (not leak the event's own outcome into the "before" state) |
 | Webcam attention | `webcam_attention.py` (OpenCV + MediaPipe FaceMesh) | Eye openness, gaze, head movement, brightness → a normalized attention score folded into the same reward signal as explicit feedback |
 
@@ -216,6 +217,14 @@ honestly-reported) proxy for within-session learning.
   batch, the next one starts fetching in the background
   (`prefetchNextBatch()`), so the eventual refresh usually finds it
   already there instead of blocking on the network.
+- **Mood picker** — a row of mood chips (curious, focused, relaxed, …)
+  above the feed lets the user re-tune recommendations to how they feel
+  right now, without opening settings. Picking one immediately re-fetches
+  the feed with that mood and shows a small "tuned for …" hint that fades
+  as the signal decays (mirrors `mood_signals.py`'s 4-hour half-life).
+- **Keyboard shortcuts** — `L` / `D` / `N` mirror the Useful / Not
+  interested / Next article buttons, disabled while typing in any field
+  or with the settings panel open.
 - **Sliding card transitions, toasts, a loading bar** — the feed
   animates the previous article out and the next one in on every
   advance (CSS transform/opacity, no JS animation library); like/dislike
@@ -422,3 +431,9 @@ Full interactive docs at `/docs` once the server is running.
   batch with near-duplicate categories. Tried the other trade-off (relax
   the cap to hit the count target) and it produced worse batches, so this
   is deliberate, not an oversight.
+- The DDQN state grew from 10 to 11 dimensions when mood-awareness was
+  added. That's not a free change: any existing per-user checkpoint
+  (`models/ddqn_<user_id>.pt`) has the old input shape, so `ddqn_agent.py`
+  falls back to reinitializing it on next load rather than crashing — a
+  disclosed trade-off (lost training progress for pre-existing users, on
+  a change that couldn't otherwise be made at all), not a silent one.
