@@ -69,3 +69,33 @@ def test_eval_run_endpoint_returns_metrics(api_client):
     for key in ("precision_at_k", "ndcg_at_k", "category_diversity", "catalog_coverage"):
         assert key in body
         assert 0.0 <= body[key] <= 1.0 + 1e-9
+
+
+def test_trending_endpoint_reflects_feedback(api_client, unique_user_id):
+    # Generate at least one interaction so category_stats.trending_score > 0
+    # for something — a brand-new seeded DB starts with everything at 0.
+    api_client.post("/onboard", json={"user_id": unique_user_id, "interests": ["technology"]})
+    rec = api_client.post("/recommend", json={"user_id": unique_user_id, "k": 8}).json()
+    item = rec["recommendations"][0]
+    api_client.post("/feedback", json={
+        "user_id": unique_user_id, "news_id": item["news_id"],
+        "time_spent": 10, "liked": 1,
+        "final_score": item["score"], "similarity": item["similarity"], "trending": item["trending"],
+    })
+
+    resp = api_client.get("/trending")
+    assert resp.status_code == 200
+    sections = resp.json()["trending"]
+    assert len(sections) > 0
+    for section in sections:
+        assert section["trending_score"] > 0
+        assert len(section["articles"]) > 0
+        assert all(a["category"] == section["category"] for a in section["articles"])
+
+
+def test_trending_endpoint_respects_limits(api_client):
+    resp = api_client.get("/trending", params={"limit_categories": 2, "articles_per_category": 1})
+    assert resp.status_code == 200
+    sections = resp.json()["trending"]
+    assert len(sections) <= 2
+    assert all(len(s["articles"]) <= 1 for s in sections)

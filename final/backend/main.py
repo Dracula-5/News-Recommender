@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from cache import TTLCache
 from config import get_settings
 from logging_config import configure_logging, get_logger
+from login_throttle import LoginThrottle
 from metrics import METRICS
 from ratelimit import RateLimiter
 from database import db_connect, import_csvs, init_db
@@ -124,15 +125,66 @@ rate_limiter = RateLimiter(
     window_seconds=settings.rate_limit_window_seconds,
 )
 
+# Tighter limiter applied only to /auth/signup and /auth/login (see
+# config.py) — credential stuffing and fake-account spam are worth a
+# stricter budget than the general API gets.
+auth_rate_limiter = RateLimiter(
+    max_requests=settings.auth_rate_limit_requests,
+    window_seconds=settings.auth_rate_limit_window_seconds,
+)
+
+# Per-account login lockout after repeated failures — see login_throttle.py.
+login_throttle = LoginThrottle(
+    max_failures=settings.login_max_failures,
+    window_seconds=settings.login_failure_window_seconds,
+    lockout_seconds=settings.login_lockout_seconds,
+)
+
+
+# Applied to every response. script-src deliberately has no 'unsafe-inline'
+# or 'unsafe-eval' — every <script> in frontend/ is an external file for
+# exactly this reason (login.html/signup.html used to have inline handlers;
+# moved to login.js/signup.js so this could be strict). style-src does allow
+# 'unsafe-inline': the app sets a few inline style attributes/properties
+# (menu dropdown visibility, toast notification colors) and CSS-only inline
+# injection can't execute script, a materially smaller risk than script-src
+# would be — a common, deliberate real-world CSP trade-off, not an oversight.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": _CSP,
+}
+
+
+_STRICT_AUTH_PATHS = {"/auth/signup", "/auth/login"}
+
 
 @app.middleware("http")
 async def observability_middleware(request: Request, call_next):
-    """Rate limiting + request logging + latency metrics in one pass."""
+    """Rate limiting + request logging + latency metrics + security headers in one pass."""
     client_ip = request.client.host if request.client else "unknown"
 
     if not rate_limiter.allow(client_ip):
         METRICS.inc("http_requests_rate_limited_total")
         return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+
+    if request.url.path in _STRICT_AUTH_PATHS and not auth_rate_limiter.allow(client_ip):
+        METRICS.inc("http_requests_rate_limited_total")
+        return JSONResponse(status_code=429, content={"detail": "Too many attempts — please wait a moment and try again."})
 
     start = time.perf_counter()
     try:
@@ -146,6 +198,9 @@ async def observability_middleware(request: Request, call_next):
     METRICS.inc("http_requests_total")
     METRICS.observe("http_request_duration_ms", duration_ms, labels={"path": request.url.path})
     logger.info("%s %s -> %s (%.1fms)", request.method, request.url.path, response.status_code, duration_ms)
+
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers[header] = value
     return response
 
 # ─────────────────────────────────────────────
@@ -200,6 +255,23 @@ def authorize_user_id(user_id: str | None, authorization: str | None = Header(No
     if not result.get("valid"):
         raise HTTPException(401, result.get("message", "Invalid or expired token"))
     if user_id and result["user_id"] != user_id:
+        raise HTTPException(403, "Token does not authorize access to this user_id")
+
+
+def require_authorized_user_id(user_id: str, authorization: str | None = Header(None)) -> None:
+    """
+    Same check as authorize_user_id, but for endpoints with no legitimate
+    guest use case — account-info lookups tied to a real signed-up
+    account (auth_users), which guests never have in the first place. No
+    token at all is rejected here, not let through.
+    """
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(401, "Authentication required")
+    result = verify_token(token)
+    if not result.get("valid"):
+        raise HTTPException(401, result.get("message", "Invalid or expired token"))
+    if result["user_id"] != user_id:
         raise HTTPException(403, "Token does not authorize access to this user_id")
 
 
@@ -263,6 +335,7 @@ class InterestsUpdatePayload(BaseModel):
     interests: list[str] = Field(default_factory=list)
     mood: str = ""
     exploration_preference: float | None = None
+    location: str = ""
 
 
 # ─────────────────────────────────────────────
@@ -354,6 +427,20 @@ def categories():
     return {"categories": cache.get_or_set("categories", engine.categories)}
 
 
+@app.get("/trending")
+def trending(limit_categories: int = 5, articles_per_category: int = 3):
+    """
+    Site-wide trending categories + a sample of articles per category —
+    not personalized, so it's safe (and cheap) to cache for the same TTL
+    as /categories rather than hitting the DB on every request.
+    """
+    cache_key = f"trending:{limit_categories}:{articles_per_category}"
+    return cache.get_or_set(
+        cache_key,
+        lambda: engine.get_trending(limit_categories, articles_per_category),
+    )
+
+
 @app.get("/users")
 def users():
     def _fetch():
@@ -379,8 +466,9 @@ def user_info(user_id: str, authorization: str | None = Header(None)):
 @app.patch("/user/{user_id}/interests")
 def update_interests(user_id: str, payload: InterestsUpdatePayload, authorization: str | None = Header(None)):
     """
-    Update a user's interests, mood, and/or exploration preference after onboarding.
-    Re-seeds category preferences from the new interest text.
+    Update a user's settings (interests, mood, exploration preference,
+    location) after onboarding. Re-seeds category preferences from the
+    new interest text. Backs the frontend settings panel.
     """
     authorize_user_id(user_id, authorization)
     with db_connect(DB_PATH) as conn:
@@ -403,6 +491,9 @@ def update_interests(user_id: str, payload: InterestsUpdatePayload, authorizatio
         if payload.exploration_preference is not None:
             updates.append("exploration_signal = ?")
             params.append(clamp(payload.exploration_preference))
+        if payload.location:
+            updates.append("current_location = ?")
+            params.append(payload.location)
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
             params.append(user_id)
@@ -425,7 +516,8 @@ def update_interests(user_id: str, payload: InterestsUpdatePayload, authorizatio
         "user_id":      user_id,
         "interests":    payload.interests,
         "mood":         payload.mood,
-        "message":      "interests updated",
+        "location":     payload.location,
+        "message":      "settings updated",
         "categories_seeded": len(prefs) if payload.interests else 0,
     }
 
@@ -433,6 +525,11 @@ def update_interests(user_id: str, payload: InterestsUpdatePayload, authorizatio
 # ─────────────────────────────────────────────
 #  AUTHENTICATION ROUTES
 # ─────────────────────────────────────────────
+
+# Matches the frontend's isValidEmail() in auth.js — was just `'@' in
+# email` here before, which accepts garbage like "a@" or "@@@".
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
 
 @app.post("/auth/signup")
 def signup(payload: SignupPayload):
@@ -452,7 +549,7 @@ def signup(payload: SignupPayload):
     password = payload.password
     
     # Validation
-    if not email or '@' not in email:
+    if not email or not _EMAIL_RE.match(email):
         raise HTTPException(400, "Invalid email format")
     
     if not username or len(username) < 3:
@@ -502,15 +599,24 @@ def login(payload: LoginPayload):
     """
     email = payload.email.strip().lower()
     password = payload.password
-    
+
     if not email or not password:
         raise HTTPException(400, "Email and password required")
-    
+
+    locked_for = login_throttle.seconds_until_unlocked(email)
+    if locked_for > 0:
+        raise HTTPException(
+            429,
+            f"Too many failed login attempts. Try again in {int(locked_for) + 1}s.",
+        )
+
     result = login_user(email, password)
-    
+
     if not result['success']:
+        login_throttle.record_failure(email)
         raise HTTPException(401, result['message'])
-    
+
+    login_throttle.record_success(email)
     return {
         'user_id': result['user_id'],
         'username': result['username'],
@@ -520,8 +626,16 @@ def login(payload: LoginPayload):
 
 
 @app.get("/auth/user/{user_id}")
-def get_auth_user(user_id: str):
-    """Get authenticated user info"""
+def get_auth_user(user_id: str, authorization: str | None = Header(None)):
+    """
+    Get authenticated user info (email, username, created_at). Was missing
+    an authorization check entirely — any caller, no token required, could
+    look up any other user's email address by user_id. Guests never have
+    an auth_users row to begin with, so unlike the rest of the per-user
+    endpoints this uses the strict check (token required, not just
+    "if present, must match") rather than authorize_user_id.
+    """
+    require_authorized_user_id(user_id, authorization)
     user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(404, "User not found")
@@ -529,16 +643,23 @@ def get_auth_user(user_id: str):
 
 
 @app.post("/auth/verify")
-def verify_auth_token(token: str = None):
-    """Verify authentication token"""
+def verify_auth_token(authorization: str | None = Header(None)):
+    """
+    Verify the bearer token in the Authorization header. Used to take the
+    token as a `?token=` query parameter — bearer tokens don't belong in a
+    URL (query strings end up in server access logs, browser history, and
+    any Referer header sent to a third-party resource the page happens to
+    load), so this now reads it the same way every other endpoint does.
+    """
+    token = _bearer_token(authorization)
     if not token:
-        raise HTTPException(400, "Token required")
-    
+        raise HTTPException(400, "Bearer token required in Authorization header")
+
     result = verify_token(token)
-    
+
     if not result['valid']:
         raise HTTPException(401, result.get('message', 'Invalid token'))
-    
+
     return {'valid': True, 'user_id': result['user_id']}
 
 

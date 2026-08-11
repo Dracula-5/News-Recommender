@@ -1014,6 +1014,55 @@ class NewsRecommender:
         }
 
     # ──────────────────────────────────────────────────────
+    #  Trending — site-wide, not per-user
+    # ──────────────────────────────────────────────────────
+    # category_stats.trending_score already blends click/like rate, dwell
+    # time, and attention (see feedback()) into a single [0,1] number per
+    # category. This just surfaces the top of that ranking with a sample
+    # of articles per category — same signal the "trending" candidate pool
+    # already uses internally, exposed directly for a "Trending Now"
+    # dashboard instead of only ever feeding into a per-user score.
+
+    def get_trending(self, limit_categories: int = 5, articles_per_category: int = 3) -> dict[str, Any]:
+        limit_categories = max(1, min(int(limit_categories), 10))
+        articles_per_category = max(1, min(int(articles_per_category), 6))
+        with db_connect(self.db_path) as conn:
+            cat_rows = conn.execute(
+                "SELECT category, trending_score, impressions, clicks, likes "
+                "FROM category_stats WHERE trending_score > 0 "
+                "ORDER BY trending_score DESC LIMIT ?",
+                (limit_categories,),
+            ).fetchall()
+
+            sections = []
+            for c in cat_rows:
+                article_rows = conn.execute(
+                    "SELECT news_id, category, abstract, full_article, url "
+                    "FROM news WHERE category = ? ORDER BY RANDOM() LIMIT ?",
+                    (c["category"], articles_per_category),
+                ).fetchall()
+                articles = []
+                for a in article_rows:
+                    raw = a["full_article"] or a["abstract"] or a["news_id"]
+                    headline = raw.split(".")[0] if raw else a["news_id"]
+                    articles.append({
+                        "news_id":  a["news_id"],
+                        "category": a["category"],
+                        "headline": headline,
+                        "abstract": a["abstract"] or "",
+                        "url":      a["url"] or "",
+                    })
+                sections.append({
+                    "category":       c["category"],
+                    "trending_score": round(float(c["trending_score"]), 4),
+                    "impressions":    int(c["impressions"]),
+                    "likes":          int(c["likes"]),
+                    "articles":       articles,
+                })
+
+        return {"trending": sections}
+
+    # ──────────────────────────────────────────────────────
     #  Reading history
     # ──────────────────────────────────────────────────────
     # `user_memory` (used elsewhere to exclude already-fed-back articles

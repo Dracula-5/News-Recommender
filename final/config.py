@@ -64,6 +64,18 @@ class Settings(BaseSettings):
     rate_limit_requests: int = 120
     rate_limit_window_seconds: float = 60.0
 
+    # Stricter limiter applied only to /auth/signup and /auth/login — these
+    # are higher-value abuse targets (credential stuffing, fake account
+    # creation) than the general API surface, so they get a tighter budget
+    # on top of (not instead of) the general per-IP limiter above.
+    auth_rate_limit_requests: int = 10
+    auth_rate_limit_window_seconds: float = 60.0
+
+    # Login brute-force lockout — see login_throttle.py.
+    login_max_failures: int = 5
+    login_failure_window_seconds: float = 300.0
+    login_lockout_seconds: float = 60.0
+
     @property
     def cors_origin_list(self) -> list[str]:
         if self.cors_origins.strip() == "*":

@@ -24,6 +24,8 @@ os.environ["NEUROFEED_AUTH_DB_PATH"] = str(_TEST_AUTH_DB_PATH)
 os.environ["NEUROFEED_ENV"] = "test"
 os.environ["NEUROFEED_ENABLE_WEBCAM_ATTENTION"] = "false"
 os.environ["NEUROFEED_RATE_LIMIT_REQUESTS"] = "10000"  # tests shouldn't trip rate limiting
+os.environ["NEUROFEED_AUTH_RATE_LIMIT_REQUESTS"] = "10000"  # separate limiter on /auth/signup, /auth/login
+os.environ["NEUROFEED_LOGIN_MAX_FAILURES"] = "10000"  # tests deliberately trigger failed logins
 
 from database import import_csvs  # noqa: E402
 from scripts.seed_demo_data import generate_news, generate_users, _rng  # noqa: E402

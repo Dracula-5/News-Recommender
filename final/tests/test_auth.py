@@ -112,3 +112,110 @@ def test_logout_revokes_the_token(api_client):
         "/recommend", json={"user_id": account["user_id"], "k": 8}, headers=headers,
     )
     assert after_logout.status_code == 401
+
+
+# ─── Security headers ──────────────────────────────────────────
+
+def test_responses_carry_security_headers(api_client):
+    resp = api_client.get("/health")
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert "script-src 'self'" in resp.headers["Content-Security-Policy"]
+    assert "unsafe-inline" not in resp.headers["Content-Security-Policy"].split("style-src")[0]
+
+
+# ─── /auth/user/{id} PII leak fix ──────────────────────────────
+
+def test_auth_user_endpoint_requires_a_token_even_for_guests(api_client):
+    account = _signup(api_client, "dana@example.com", "dana_test_user")
+    # No Authorization header at all — unlike the guest-friendly endpoints,
+    # this one has no legitimate anonymous use case (guests have no
+    # auth_users row), so it must reject, not silently pass through.
+    resp = api_client.get(f"/auth/user/{account['user_id']}")
+    assert resp.status_code == 401
+
+
+def test_auth_user_endpoint_rejects_cross_account_access(api_client):
+    victim = _signup(api_client, "erin@example.com", "erin_test_user")
+    attacker = _signup(api_client, "frank@example.com", "frank_test_user")
+    resp = api_client.get(
+        f"/auth/user/{victim['user_id']}",
+        headers={"Authorization": f"Bearer {attacker['token']}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_auth_user_endpoint_allows_own_account(api_client):
+    account = _signup(api_client, "grace@example.com", "grace_test_user")
+    resp = api_client.get(
+        f"/auth/user/{account['user_id']}",
+        headers={"Authorization": f"Bearer {account['token']}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["email"] == "grace@example.com"
+
+
+# ─── /auth/verify no longer takes the token via query string ──
+
+def test_verify_endpoint_reads_token_from_header(api_client):
+    account = _signup(api_client, "henry@example.com", "henry_test_user")
+    resp = api_client.post(
+        "/auth/verify", headers={"Authorization": f"Bearer {account['token']}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["valid"] is True
+
+
+def test_verify_endpoint_rejects_missing_token(api_client):
+    resp = api_client.post("/auth/verify")
+    assert resp.status_code == 400
+
+
+# ─── Email validation ──────────────────────────────────────────
+
+def test_signup_rejects_malformed_email(api_client):
+    resp = api_client.post(
+        "/auth/signup",
+        json={"email": "not-an-email", "username": "someone_test", "password": "testpass123"},
+    )
+    assert resp.status_code == 400
+
+
+# ─── Login brute-force lockout ─────────────────────────────────
+
+def test_login_locks_out_after_repeated_failures(api_client):
+    from backend.main import login_throttle
+
+    _signup(api_client, "ivan@example.com", "ivan_test_user", password="correct-password1")
+
+    orig_max_failures = login_throttle.max_failures
+    login_throttle.max_failures = 3
+    try:
+        for _ in range(3):
+            resp = api_client.post(
+                "/auth/login", json={"email": "ivan@example.com", "password": "wrong-password"},
+            )
+            assert resp.status_code == 401
+
+        # Locked out now, even with the *correct* password.
+        locked = api_client.post(
+            "/auth/login", json={"email": "ivan@example.com", "password": "correct-password1"},
+        )
+        assert locked.status_code == 429
+    finally:
+        login_throttle.max_failures = orig_max_failures
+        login_throttle.record_success("ivan@example.com")  # clear lockout state for other tests
+
+
+def test_login_success_clears_prior_failures(api_client):
+    from backend.main import login_throttle
+
+    _signup(api_client, "judy@example.com", "judy_test_user", password="correct-password1")
+    login_throttle.record_failure("judy@example.com")
+    login_throttle.record_failure("judy@example.com")
+
+    resp = api_client.post(
+        "/auth/login", json={"email": "judy@example.com", "password": "correct-password1"},
+    )
+    assert resp.status_code == 200
+    assert login_throttle.seconds_until_unlocked("judy@example.com") == 0
