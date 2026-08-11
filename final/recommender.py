@@ -444,8 +444,23 @@ class NewsRecommender:
                 "ORDER BY rowid DESC LIMIT 20",
                 (user_id,),
             ).fetchall()
-            liked_cats    = {r["category"] for r in recent_rows if r["liked"] == 1}
-            disliked_cats = {r["category"] for r in recent_rows if r["liked"] == 0}
+            # Ratio-based classification, not "any": with a binary "any
+            # liked / any disliked in the window" rule, a category the user
+            # likes *most* of the time still picks up a single stray
+            # dislike as it accumulates interactions, lands in *both* sets,
+            # and eats the +0.20 like boost AND the -0.50 dislike penalty
+            # (net -0.30) — which quietly punishes exactly the categories a
+            # user engages with most. The offline evaluation harness
+            # (evaluation.py) caught this as a negative within-session
+            # learning curve. Thresholds are disjoint by construction so a
+            # category can never land in both sets.
+            cat_like_ratio: dict[str, list[int]] = {}
+            for r in recent_rows:
+                counts = cat_like_ratio.setdefault(r["category"], [0, 0])
+                counts[1] += 1
+                counts[0] += int(r["liked"] == 1)
+            liked_cats    = {c for c, (likes, total) in cat_like_ratio.items() if likes / total >= 0.6}
+            disliked_cats = {c for c, (likes, total) in cat_like_ratio.items() if likes / total <= 0.3}
 
             interaction_count = conn.execute(
                 "SELECT COUNT(*) FROM interactions WHERE user_id = ?", (user_id,)

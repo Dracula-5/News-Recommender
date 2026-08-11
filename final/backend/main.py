@@ -675,3 +675,27 @@ def nlp_score(payload: NlpScorePayload):
     engine._ensure_nlp()
     scores = engine._nlp.score_candidates(user["user_interest_text"], payload.news_ids)
     return {"user_id": payload.user_id, "scores": scores}
+
+
+# ─────────────────────────────────────────────
+#  OFFLINE EVALUATION
+# ─────────────────────────────────────────────
+
+@app.get("/eval/run")
+def eval_run(users: int = 3, rounds: int = 10, k: int = 8, seed: int = 0):
+    """
+    Runs a simulated-user evaluation episode (see evaluation.py) against
+    the live engine + DB and returns Precision@K / NDCG@K / diversity /
+    coverage, plus an early-vs-late precision split that shows whether the
+    system is actually adapting within a session.
+
+    This is a dev/demo endpoint, not something a production deployment
+    would expose unauthenticated — it writes synthetic `eval_sim_user_*`
+    rows into the same database. Kept small by default (3 users x 10
+    rounds) to stay fast; bump the query params for a deeper run.
+    """
+    from evaluation import evaluate
+
+    users = max(1, min(users, 10))
+    rounds = max(1, min(rounds, 50))
+    return evaluate(engine, n_users=users, rounds=rounds, k=k, seed=seed)
