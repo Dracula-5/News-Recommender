@@ -76,6 +76,21 @@ class Settings(BaseSettings):
     login_failure_window_seconds: float = 300.0
     login_lockout_seconds: float = 60.0
 
+    # ── Live news (NewsAPI.org) ─────────────────────────────
+    # Empty by default — the "Live News" bulletin (GET /news/live) and
+    # the background refresh it triggers are both no-ops without a key,
+    # never a startup error. Get a free key at https://newsapi.org.
+    news_api_key: str = ""
+    news_api_base_url: str = "https://newsapi.org/v2/top-headlines"
+    news_api_country: str = "us"
+    # How many articles to pull per refresh. Kept small deliberately —
+    # this is a display bulletin, not the main catalog.
+    news_api_page_size: int = 12
+    # Minimum time between live refreshes. NewsAPI's free tier caps out at
+    # 100 requests/day; one refresh = one request, so 90 min (16/day) stays
+    # well under that with room for manual restarts.
+    news_live_cache_ttl_seconds: float = 5400.0
+
     @property
     def cors_origin_list(self) -> list[str]:
         if self.cors_origins.strip() == "*":

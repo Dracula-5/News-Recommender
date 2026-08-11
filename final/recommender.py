@@ -282,7 +282,13 @@ class NewsRecommender:
     ) -> list[dict[str, Any]]:
         blocked_sql = ",".join("?" for _ in blocked) or "''"
         seen_sql    = ",".join("?" for _ in seen_news) or "''"
-        base_filter = f"news.category NOT IN ({blocked_sql}) AND news.news_id NOT IN ({seen_sql})"
+        # is_live=1 rows (live_news.py) are the dedicated "Live News"
+        # bulletin's content, deliberately excluded from the trained/scored
+        # candidate pool — see database.py's migration comment.
+        base_filter = (
+            f"news.category NOT IN ({blocked_sql}) AND news.news_id NOT IN ({seen_sql})"
+            " AND news.is_live = 0"
+        )
         base_params = list(blocked) + list(seen_news)
         if location:
             base_filter += " AND news.location = ?"
@@ -367,7 +373,7 @@ class NewsRecommender:
                 for row in conn.execute(
                     f"SELECT news_id, category, subcategory, location, preferred_time,"
                     f" age_group, article_length, abstract, full_article, url"
-                    f" FROM news WHERE category = ? AND news_id NOT IN ({exc_sql})"
+                    f" FROM news WHERE category = ? AND is_live = 0 AND news_id NOT IN ({exc_sql})"
                     f" ORDER BY RANDOM() LIMIT ?",
                     [cat, *exclude, per_category],
                 ).fetchall():
@@ -1109,7 +1115,7 @@ class NewsRecommender:
             for c in cat_rows:
                 article_rows = conn.execute(
                     "SELECT news_id, category, abstract, full_article, url "
-                    "FROM news WHERE category = ? ORDER BY RANDOM() LIMIT ?",
+                    "FROM news WHERE category = ? AND is_live = 0 ORDER BY RANDOM() LIMIT ?",
                     (c["category"], articles_per_category),
                 ).fetchall()
                 articles = []

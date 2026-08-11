@@ -239,6 +239,28 @@ def init_db(db_path: Path = DB_PATH) -> None:
             # mood set days ago shouldn't still be steering the feed.
             conn.execute("ALTER TABLE users ADD COLUMN mood_updated_at TEXT")
 
+        existing_news_cols = {row["name"] for row in conn.execute("PRAGMA table_info(news)").fetchall()}
+        news_extra_cols = {
+            # Real articles pulled from a live news API (live_news.py),
+            # upserted into this same table rather than a separate one so
+            # the existing news_id-keyed schema (interactions, user_memory,
+            # etc.) needs no changes. is_live=0 for every synthetic/seeded
+            # row (the DEFAULT backfills existing rows too) — recommend()'s
+            # candidate queries and get_trending()'s sample picker both
+            # explicitly exclude is_live=1, so these only ever surface
+            # through GET /news/live. Deliberate scope choice: entangling
+            # them with the trained NLP/MMR candidate pool is a bigger,
+            # separate decision (LSA vectors are fit once at first
+            # /recommend and wouldn't cover articles added afterward).
+            "is_live":      "INTEGER DEFAULT 0",
+            "image_url":    "TEXT DEFAULT ''",
+            "source_name":  "TEXT DEFAULT ''",
+            "published_at": "TEXT DEFAULT ''",
+        }
+        for col, definition in news_extra_cols.items():
+            if col not in existing_news_cols:
+                conn.execute(f"ALTER TABLE news ADD COLUMN {col} {definition}")
+
 
 def normalize_user_columns(df: pd.DataFrame) -> pd.DataFrame:
     defaults = {

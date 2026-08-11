@@ -25,6 +25,7 @@ from login_throttle import LoginThrottle
 from metrics import METRICS
 from ratelimit import RateLimiter
 from database import db_connect, import_csvs, init_db
+import live_news
 from recommender import NewsRecommender
 from utils import category_preference_from_text, clamp
 from webcam_attention import (
@@ -154,7 +155,10 @@ _CSP = (
     "script-src 'self'; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src 'self' https://fonts.gstatic.com; "
-    "img-src 'self' data:; "
+    # https: (not a specific host) because Live News thumbnails
+    # (live_news.py) come from whatever domain each article's original
+    # publisher hosts images on — can't be known/allowlisted in advance.
+    "img-src 'self' data: https:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
@@ -439,6 +443,33 @@ def trending(limit_categories: int = 5, articles_per_category: int = 3):
         cache_key,
         lambda: engine.get_trending(limit_categories, articles_per_category),
     )
+
+
+@app.get("/news/live")
+def news_live(limit: int = 8):
+    """
+    Real articles pulled from NewsAPI.org (live_news.py), refreshed at most
+    once per `NEUROFEED_NEWS_LIVE_CACHE_TTL_SECONDS` (default 90 min — the
+    free NewsAPI tier caps at 100 requests/day, one refresh = one request)
+    and persisted into the `news` table tagged `is_live=1`. Deliberately
+    excluded from the personalized/trained recommend() pool — see
+    database.py's migration comment — this is the only place they surface.
+    `configured: false` means no NEUROFEED_NEWS_API_KEY is set yet; the
+    frontend uses that to hide the bulletin instead of showing an empty one.
+    """
+    limit = max(1, min(int(limit), 20))
+    cache.get_or_set(
+        "live_news:refresh",
+        lambda: live_news.fetch_and_store_live_news(DB_PATH, settings),
+        ttl=settings.news_live_cache_ttl_seconds,
+    )
+    with db_connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT news_id, category, abstract, url, image_url, source_name, published_at "
+            "FROM news WHERE is_live = 1 ORDER BY published_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {"articles": [dict(r) for r in rows], "configured": bool(settings.news_api_key)}
 
 
 @app.get("/users")
