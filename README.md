@@ -72,7 +72,10 @@ actually make a production recommender hard:
 | BM25 + TF-IDF + LSA ensemble | `nlp_engine.py` | 40/40/20 blended retrieval; LSA (64-dim truncated SVD) also doubles as the content-embedding space for diversity re-ranking |
 | **Cold-start weight blending** | `recommender.py` | Below `NEUROFEED_COLD_START_INTERACTION_THRESHOLD` (default 5) logged interactions, scoring shifts weight off the still-untrained Q-value/TS-reward terms and onto declared interests + trending — the standard RecSys cold-start fallback, made explicit and inspectable (`is_cold_start` in the API response) rather than left as an implicit side effect of an untrained model |
 | **MMR diversity re-ranking** | `reranking.py` | Carbonell & Goldstein's Maximal Marginal Relevance over LSA content vectors — trades a configurable amount of relevance (`NEUROFEED_MMR_LAMBDA`, default 0.75) for spread, so a batch isn't five variations on one story |
-| HITL feedback loop | `recommender.py`, `webcam_attention.py` | Every like/dislike/poll/dwell-time/attention-score event updates SQLite, category preferences, the replay buffer, and DDQN weights immediately |
+| **Graph-informed exploration** | `graph_memory.py`, `recommender.py` | Co-interest edges (which categories a user tends to like *together*, time-decayed like everything else in the graph) give a small score boost to related-but-not-yet-liked categories, steering exploration toward what the graph has learned this user tends to like — not just random/trending |
+| **Discounted bandits** | `rl_policies.py` | Thompson Sampling and UCB1 both discount old evidence (configurable decay, default 0.995) — plain bandit math assumes a stationary reward distribution, but a user's taste for a category drifts over weeks; without this, a few hundred interactions make the posterior nearly immovable |
+| **Reading history & memory summary** | `recommender.py` | `get_history()` — the full interactions log, paginated, not just the 100-entry seen-exclusion list. `get_memory_summary()` — a human-readable digest (top/rising/fading interests, related categories) of the same signal the scorer consumes as opaque numbers |
+| HITL feedback loop | `recommender.py`, `webcam_attention.py` | Every like/dislike/poll/dwell-time/attention-score event updates SQLite, category preferences, the replay buffer, and DDQN weights immediately — state/next_state are built to cleanly bracket each transition (not leak the event's own outcome into the "before" state) |
 | Webcam attention | `webcam_attention.py` (OpenCV + MediaPipe FaceMesh) | Eye openness, gaze, head movement, brightness → a normalized attention score folded into the same reward signal as explicit feedback |
 
 ## Engineering practices (the "senior developer" half)
@@ -84,7 +87,8 @@ actually make a production recommender hard:
 | **Caching** | `cache.py` — documented in-memory TTL cache with a Redis-shaped interface (`get`/`set`/`get_or_set`), wired into the hot, cheap-to-stale read paths |
 | **Rate limiting** | `ratelimit.py` — fixed-window limiter, same "swap for Redis later" interface |
 | **Evaluation** | `evaluation.py` — see below |
-| **Testing** | `tests/` — pytest suite (38 tests) against an isolated, auto-seeded temp SQLite DB; never touches the dev database |
+| **Authorization** | `authorize_user_id()` in `backend/main.py` — every per-user endpoint checks the bearer token's identity against the requested `user_id`; guest mode (no token) still works, a *mismatched* token gets 403. Constant-time password comparison (`hmac.compare_digest`), server-side logout (`POST /auth/logout` actually revokes the token, not just a client-side `localStorage.clear()`) |
+| **Testing** | `tests/` — pytest suite (69 tests) against isolated, auto-seeded temp SQLite DBs (main + auth, separately); never touches the dev databases |
 | **CI** | `.github/workflows/ci.yml` — seeds synthetic data, runs the full suite with coverage, builds the Docker image |
 | **Containerization** | `Dockerfile` + `docker-compose.yml` — `docker compose up --build` and it's running, no manual data-loading step |
 | **Reproducibility** | `scripts/seed_demo_data.py` — the original MIND-style dataset is proprietary/gitignored like any real production dataset would be, so this generates a small, topically-coherent synthetic stand-in (BM25/TF-IDF/LSA need real lexical signal to be worth demonstrating, so it's templated per-category, not random word soup) |
@@ -110,6 +114,39 @@ app. Switched to ratio-based, disjoint-by-construction classification
 
 That fix is locked in with a regression test
 (`test_a_category_with_mostly_likes_is_not_also_classified_disliked`).
+
+A second, more thorough bug-hunting pass turned up several more —
+listing them because a portfolio project with zero bugs ever found in it
+is a sign nobody looked hard enough, not a sign of quality:
+
+- **Deadlock**: `graph_memory.get_co_interest_categories()` called
+  another lock-acquiring method from inside its own lock
+  (`threading.Lock` isn't reentrant). Latent — nothing called it yet —
+  until this pass wired it into `recommend()`'s exploration boost, which
+  would have made it a very real, very confusing hang.
+- **Double-decay on every restart**: the interest graph re-applied decay
+  for the same elapsed window twice after a process restart, because
+  `last_time` wasn't rebased after the load-time decay was already
+  applied.
+- **Scores frozen between writes**: decay only ever ran on a write or a
+  DB load — a category a user stopped engaging with kept its last score
+  *forever* if the process just kept running, which is the opposite of
+  "stale interests fade out." Now computed live at read time.
+- **IDOR in the API**: despite the frontend sending `Authorization:
+  Bearer <token>` on every request, nothing on the backend checked it
+  against the request's `user_id` — any client could read or mutate
+  *any* user's feed, profile, and feedback history. Found by writing a
+  test for the fix, which is how the next one turned up too —
+- **Test isolation gap**: `auth.py`'s DB path was a hardcoded constant
+  with no override, so the isolated-test-DB setup only ever covered the
+  main database — every test that touched signup/login had been quietly
+  writing real accounts into the dev `auth.sqlite`.
+- **Thread-per-user leak**: `DDQNAgent` spun up a dedicated background
+  thread per user, cached for the process lifetime with no eviction.
+
+Full writeups of each (root cause, fix, and the regression test that
+locks it in) are in the commit messages — `git log` tells this part of
+the story better than a paraphrase would.
 
 ## Evaluation methodology
 
@@ -173,11 +210,15 @@ pytest -v
 | Group | Endpoints |
 |---|---|
 | Core loop | `POST /onboard`, `POST /recommend`, `POST /feedback`, `POST /poll_feedback` |
-| Auth | `POST /auth/signup`, `POST /auth/login`, `GET /auth/user/{id}`, `POST /auth/verify` |
+| Auth | `POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/user/{id}`, `POST /auth/verify` |
+| History & memory | `GET /history/{user_id}`, `GET /memory/summary/{user_id}` |
 | Attention | `GET /attention`, `POST /attention/start`, `POST /attention/stop`, `GET /attention/stream` |
-| RL / graph / NLP introspection | `GET /rl/metrics/{user_id}`, `GET /graph/stats/{user_id}`, `GET /graph/top/{user_id}`, `GET /nlp/status`, `POST /nlp/score` |
+| RL / graph / NLP introspection | `GET /rl/metrics/{user_id}`, `GET /graph/stats/{user_id}`, `GET /graph/top/{user_id}`, `GET /graph/related/{user_id}/{category}`, `GET /nlp/status`, `POST /nlp/score` |
 | Evaluation | `GET /eval/run` |
 | Ops | `GET /health`, `GET /metrics`, `GET /categories`, `GET /users` |
+
+Every per-user endpoint above (core loop, history/memory, profile) is
+gated by `authorize_user_id()` — see [Authorization](#engineering-practices-the-senior-developer-half) above.
 
 Full interactive docs at `/docs` once the server is running.
 
@@ -220,3 +261,9 @@ Full interactive docs at `/docs` once the server is running.
 - The early-vs-late learning-delta metric is noisy over short simulated
   episodes (small sample buckets) — treat it as a sanity check that the
   system *can* learn within a session, not a precise benchmark.
+- `recommend()` prioritizes the category-diversity cap (max 2 per
+  category) over hitting `k` exactly — on a thin or category-skewed
+  candidate pool it can return fewer than `k` items rather than pad the
+  batch with near-duplicate categories. Tried the other trade-off (relax
+  the cap to hit the count target) and it produced worse batches, so this
+  is deliberate, not an oversight.
