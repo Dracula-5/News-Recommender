@@ -1,0 +1,24 @@
+services:
+  neurofeed:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      NEUROFEED_ENV: production
+      NEUROFEED_LOG_LEVEL: INFO
+      NEUROFEED_CORS_ORIGINS: "*"
+      NEUROFEED_ENABLE_WEBCAM_ATTENTION: "false"
+    volumes:
+      # Data and trained per-user models survive `docker compose down`.
+      - neurofeed_data:/app/data
+      - neurofeed_models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  neurofeed_data:
+  neurofeed_models:

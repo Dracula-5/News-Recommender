@@ -1,391 +1,222 @@
-# NeuroFeed — AI-Powered Hyper-Personalized News Recommender
+# NeuroFeed — an adaptive news feed with a real RL/bandit stack behind it
 
-> A production-style news recommendation system powered by a **Dueling Double Deep Q-Network (DDQN)**, real-time **webcam attention tracking**, and a **poll-driven interaction scoring** model — all running locally with FastAPI + SQLite + a browser UI.
+NeuroFeed is a from-scratch news recommender that re-ranks its feed after
+**every single interaction** — like, dislike, dwell time, even webcam
+attention — using a Dueling Double DQN blended with contextual bandits, a
+time-decayed interest graph, and an ensemble retrieval engine. It's a
+personal systems project, built to be read end-to-end: every non-obvious
+design decision below is one I made deliberately and can defend.
 
----
-
-## What It Does
-
-NeuroFeed learns what you want to read **in real time**. Every article interaction (like, dislike, dwell time, poll answer, eye-tracking data) feeds back into a reinforcement learning agent that reshapes your next recommendations immediately.
-
-| Capability | Details |
-|---|---|
-| **RL Recommender** | Dueling DDQN selects categories; TF-IDF ranks articles within them |
-| **Attention Tracking** | OpenCV + MediaPipe measures eye openness, gaze, head movement, brightness |
-| **Interaction Score** | `0.55·click + 0.10·poll + 0.20·log_dwell + 0.15·history` |
-| **Hyper-personalized Feed** | 45% liked categories · 25% trending · 30% exploration, reshuffled every 3 articles |
-| **Like Boost** | Next 6 articles include 2–3 from the same liked category |
-| **Dislike Suppression** | Disliked category limited to 1 article in next 5 |
-| **Poll System** | After 20 s of reading, a popup asks "Do you like this?" — answer moderately adjusts category score |
-| **JWT Auth** | Signup / login with hashed passwords and token-based sessions |
-| **HITL Feedback Loop** | Every like / skip / poll updates SQLite, category preferences, replay buffer, and DDQN weights |
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Backend API | FastAPI + Uvicorn |
-| Database | SQLite (via `database.py`) |
-| RL Agent | PyTorch — Dueling Double DQN |
-| Similarity | scikit-learn TF-IDF + cosine similarity |
-| Attention | OpenCV + MediaPipe Face Mesh |
-| Auth | JWT tokens + SHA-256 password hashing |
-| Frontend | Vanilla HTML / CSS / JavaScript |
-| Data | Pandas (CSV → SQLite import) |
-
----
-
-## Folder Structure
+The UI is deliberately quiet about all of this — it reads like a
+newspaper live-blog, not a debugging console. The RL/bandit/attention
+machinery keeps running underneath; none of it is surfaced as a dashboard.
 
 ```
-news_recommender/
-│
-├── final/                              ← Main project root
-│   │
-│   ├── backend/
-│   │   └── main.py                     ← FastAPI app, all API routes
-│   │
-│   ├── frontend/
-│   │   ├── index.html                  ← Main feed UI
-│   │   ├── login.html                  ← Login page
-│   │   ├── signup.html                 ← Signup page
-│   │   ├── app.js                      ← Feed logic, webcam, feedback, polls
-│   │   ├── auth.js                     ← Login / signup JS
-│   │   ├── styles.css                  ← Main stylesheet
-│   │   └── auth.css                    ← Auth page styles
-│   │
-│   ├── data/
-│   │   ├── news_transformed.csv        ← Place your news dataset here
-│   │   └── user_profile_scored.csv     ← Place your user dataset here
-│   │       (news_recommender.sqlite auto-generated on first run)
-│   │
-│   ├── models/
-│   │   └── .gitkeep                    ← DDQN weights saved here per user
-│   │       (ddqn_<user_id>.pt files created automatically)
-│   │
-│   ├── tests/
-│   │   ├── simulate_session.py         ← Automated session simulation
-│   │   └── deep_audit.py               ← Deep audit / integration tests
-│   │
-│   ├── auth.py                         ← JWT auth: signup, login, token verify
-│   ├── database.py                     ← SQLite schema, CSV importer, helpers
-│   ├── ddqn_agent.py                   ← Dueling Double DQN implementation
-│   ├── recommender.py                  ← Core recommendation engine
-│   ├── train_ddqn.py                   ← Offline DDQN training script
-│   ├── utils.py                        ← Scoring formulas, clamp, similarity helpers
-│   ├── webcam_attention.py             ← OpenCV + MediaPipe attention pipeline
-│   └── requirements.txt
-│
-├── .gitignore
-└── README.md
+┌─────────────────────────────────────────────────────────────────────┐
+│  Browser (editorial-style feed UI)                                  │
+│    - webcam attention starts silently in the background             │
+│    - polls /attention for a live score, never renders it             │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                 │ REST (FastAPI)
+┌───────────────────────────────▼─────────────────────────────────────┐
+│  backend/main.py                                                    │
+│    observability middleware: rate limit → request log → metrics     │
+│    TTL cache (categories/users) · JWT-ish token auth · /health       │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                 │
+┌───────────────────────────────▼─────────────────────────────────────┐
+│  recommender.py  — NewsRecommender.recommend()                      │
+│                                                                      │
+│   candidates ─▶ score ─▶ cold-start weight blend ─▶ pool mixing      │
+│                  │           (few interactions?)      (liked /       │
+│                  │                                     trending /    │
+│                  │                                     explore)      │
+│                  ▼                                        │         │
+│         per-candidate score =                              ▼         │
+│           DDQN Q-value        (ddqn_agent.py)      MMR diversity     │
+│         + NLP similarity      (nlp_engine.py)       re-rank          │
+│         + trending            (category_stats)     (reranking.py)   │
+│         + category preference                              │         │
+│         + graph interest      (graph_memory.py)             ▼         │
+│         + Thompson Sampling   (rl_policies.py)      final k articles │
+│         + attention boost     (webcam_attention.py)                  │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                          SQLite (WAL mode)
 ```
 
----
+## Why this exists
 
-## Prerequisites
+Most "recommender system" portfolio projects stop at content-based
+filtering with cosine similarity. This one implements the parts that
+actually make a production recommender hard:
 
-| Requirement | Minimum Version | Check |
+- an online-learning agent that updates *during* the session, not offline
+- the cold-start problem (new user, untrained agent) as an explicit,
+  testable code path — not just "well it's random at first"
+- diversity re-ranking, because pure top-K-by-score degenerates into five
+  near-duplicate stories the moment one category scores well
+- an implicit, physical signal (webcam-derived attention) folded into the
+  same reward function as explicit likes/dislikes
+- an evaluation methodology that works despite the fact that this is an
+  interactive system, not a static ranking problem you can replay logs
+  against
+
+## RecSys techniques implemented
+
+| Technique | Where | What it does |
 |---|---|---|
-| Python | 3.10+ | `python --version` |
-| pip | latest | `pip --version` |
-| Git | any | `git --version` |
-| Webcam *(optional)* | any USB / built-in | — |
-| RAM | 4 GB+ | — |
-| Disk space | 2 GB free (PyTorch) | — |
+| Dueling Double DQN | `ddqn_agent.py` | Learns per-category Q-values from a 10-D state (attention, interaction score, recency, category preference, exploration signal, graph score, TS reward, cyclical time-of-day, session like-rate) |
+| Thompson Sampling + UCB1 | `rl_policies.py` | `HybridPolicy` blends both bandits with the DDQN, so category selection doesn't rely on Q-values alone while they're still noisy |
+| Time-decayed interest graph | `graph_memory.py` | NetworkX graph of user↔category edges with exponential decay (1-week half-life) — captures "used to like this, drifting away" without a full retrain |
+| BM25 + TF-IDF + LSA ensemble | `nlp_engine.py` | 40/40/20 blended retrieval; LSA (64-dim truncated SVD) also doubles as the content-embedding space for diversity re-ranking |
+| **Cold-start weight blending** | `recommender.py` | Below `NEUROFEED_COLD_START_INTERACTION_THRESHOLD` (default 5) logged interactions, scoring shifts weight off the still-untrained Q-value/TS-reward terms and onto declared interests + trending — the standard RecSys cold-start fallback, made explicit and inspectable (`is_cold_start` in the API response) rather than left as an implicit side effect of an untrained model |
+| **MMR diversity re-ranking** | `reranking.py` | Carbonell & Goldstein's Maximal Marginal Relevance over LSA content vectors — trades a configurable amount of relevance (`NEUROFEED_MMR_LAMBDA`, default 0.75) for spread, so a batch isn't five variations on one story |
+| HITL feedback loop | `recommender.py`, `webcam_attention.py` | Every like/dislike/poll/dwell-time/attention-score event updates SQLite, category preferences, the replay buffer, and DDQN weights immediately |
+| Webcam attention | `webcam_attention.py` (OpenCV + MediaPipe FaceMesh) | Eye openness, gaze, head movement, brightness → a normalized attention score folded into the same reward signal as explicit feedback |
 
-> **Windows users:** Use **Git Bash**, **CMD**, or **PowerShell** — all commands below work in any of them.
+## Engineering practices (the "senior developer" half)
 
----
+| Area | What's there |
+|---|---|
+| **Config** | `config.py` — one `pydantic-settings` source of truth (`.env.example`), replacing scattered `os.getenv()` calls and hardcoded constants |
+| **Observability** | `logging_config.py` (structured, timestamped, ASCII-safe — see below), `metrics.py` (dependency-free Prometheus-format `/metrics`), request logging + latency histograms via middleware |
+| **Caching** | `cache.py` — documented in-memory TTL cache with a Redis-shaped interface (`get`/`set`/`get_or_set`), wired into the hot, cheap-to-stale read paths |
+| **Rate limiting** | `ratelimit.py` — fixed-window limiter, same "swap for Redis later" interface |
+| **Evaluation** | `evaluation.py` — see below |
+| **Testing** | `tests/` — pytest suite (38 tests) against an isolated, auto-seeded temp SQLite DB; never touches the dev database |
+| **CI** | `.github/workflows/ci.yml` — seeds synthetic data, runs the full suite with coverage, builds the Docker image |
+| **Containerization** | `Dockerfile` + `docker-compose.yml` — `docker compose up --build` and it's running, no manual data-loading step |
+| **Reproducibility** | `scripts/seed_demo_data.py` — the original MIND-style dataset is proprietary/gitignored like any real production dataset would be, so this generates a small, topically-coherent synthetic stand-in (BM25/TF-IDF/LSA need real lexical signal to be worth demonstrating, so it's templated per-category, not random word soup) |
 
-## Local Setup — Step by Step
+One concrete bug worth calling out, because it's the kind of thing that's
+easy to gloss over in a portfolio writeup: while building the evaluation
+harness below, the *first* run showed **precision degrading within a
+session** instead of improving, which shouldn't happen. The root cause
+was in the category-preference logic — a category could land in *both*
+`liked_cats` and `disliked_cats` in the same scoring pass (binary "any
+liked / any disliked in the last 20 interactions" meant a category the
+user liked 90% of the time still picked up a stray miss as history
+accumulated), so it ate a `+0.20` boost *and* a `-0.50` penalty at once —
+net punishing a user's actual favorite category the more they used the
+app. Switched to ratio-based, disjoint-by-construction classification
+(`>=0.6` liked / `<=0.3` disliked) and re-ran the identical scenario:
 
-### Step 1 — Clone the repository
+| | Before | After |
+|---|---|---|
+| Precision@K | 0.464 | 0.623 |
+| NDCG@K | 0.750 | 0.850 |
+| Learning delta (late − early precision) | **−0.476** | **+0.343** |
+
+That fix is locked in with a regression test
+(`test_a_category_with_mostly_likes_is_not_also_classified_disliked`).
+
+## Evaluation methodology
+
+Real logged interactions can't be replayed for offline evaluation here —
+`recommend()` deliberately never re-shows an article once feedback has
+been given on it, so "did we recommend what they later liked" is
+circular by construction. Instead, `evaluation.py` runs a **simulated-user
+episode** (the standard approach for evaluating interactive/bandit
+recommenders): give a synthetic user a ground-truth set of preferred
+categories, drive the *real* recommend → feedback loop against the real
+engine and database for N rounds, and score each round against that
+ground truth.
 
 ```bash
-git clone https://github.com/Dracula-5/news_recommender.git
-cd news_recommender
+python evaluation.py --users 5 --rounds 15
+# or: GET /eval/run?users=3&rounds=10&k=8
 ```
 
----
+Reports Precision@K, NDCG@K, intra-list category diversity, catalog
+coverage, and an early-vs-late precision split as a (noisy, small-sample,
+honestly-reported) proxy for within-session learning.
 
-### Step 2 — Create and activate a virtual environment
+## Quick start
 
-```bash
-# Create the venv
-python -m venv venv
-
-# Windows CMD
-venv\Scripts\activate.bat
-
-# Windows PowerShell
-venv\Scripts\Activate.ps1
-
-# Git Bash / macOS / Linux
-source venv/bin/activate
-```
-
-You should see `(venv)` at the start of your terminal prompt after activation.
-
----
-
-### Step 3 — Install dependencies
-
-```bash
-pip install -r final/requirements.txt
-```
-
-> This installs FastAPI, Uvicorn, PyTorch, OpenCV, MediaPipe, scikit-learn, pandas, and everything else.
-> First install takes **3–5 minutes** because PyTorch is large.
-
----
-
-### Step 4 — Add your dataset files
-
-Place both CSV files into the `final/data/` folder:
-
-```
-final/data/news_transformed.csv
-final/data/user_profile_scored.csv
-```
-
-The importer also checks these fallback locations:
-
-```
-final/news_transformed.csv
-final/interaction_profile_scored_final.csv
-```
-
-The SQLite database is created automatically when the server starts for the first time.
-
----
-
-### Step 5 — Start the backend server
+### Docker (recommended — zero setup)
 
 ```bash
 cd final
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+docker compose up --build
 ```
 
-Expected output:
+Open `http://localhost:8000/app`. The container seeds a synthetic demo
+dataset on first boot (see [Reproducibility](#engineering-practices-the-senior-developer-half) above) — no dataset
+download, no manual import step.
 
-```
-🚀 Starting backend...
-⚠️  Webcam attention disabled. Set ENABLE_WEBCAM_ATTENTION=1 to enable.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Application startup complete.
-```
-
----
-
-### Step 6 — Import your data (first run only)
-
-Open your browser and go to:
-
-```
-http://localhost:8000/docs
-```
-
-Find **`POST /import_data`** → click **Try it out → Execute**.
-
-Or run it from the terminal:
-
-```bash
-curl -X POST http://localhost:8000/import_data
-```
-
-This reads the CSVs and populates the SQLite database. **Only needed once.**
-
----
-
-### Step 7 — Open the app
-
-```
-http://localhost:8000/app
-```
-
-1. Click **Sign up** to create an account
-2. Fill in the onboarding form (interests, mood, time available, location)
-3. Click **Launch feed →**
-4. Read articles — like, dislike, or skip
-5. Watch the feed adapt to your preferences in real time
-
----
-
-### Step 8 — Enable webcam attention tracking (optional)
-
-**Option A — Enable on server startup:**
-
-```bash
-# Windows CMD
-set ENABLE_WEBCAM_ATTENTION=1
-uvicorn backend.main:app --reload --port 8000
-
-# Windows PowerShell
-$env:ENABLE_WEBCAM_ATTENTION="1"
-uvicorn backend.main:app --reload --port 8000
-
-# Git Bash / macOS / Linux
-ENABLE_WEBCAM_ATTENTION=1 uvicorn backend.main:app --reload --port 8000
-```
-
-**Option B — Enable from the UI:**
-
-Click **Start webcam** in the top-right of the feed page. The camera panel shows a live annotated video stream and real-time metrics: brightness, eye openness, EAR, gaze score, head movement, and energy.
-
----
-
-## How the Feed Works
-
-```
-Onboard → pick interests, mood, time available
-    │
-    ▼
-Backend scores candidates:
-  DDQN Q-value       (30%) + TF-IDF similarity (24%)
-  Trending score     (14%) + Category preference (12%)
-  Attention boost    (up to 25%) + Recency boost (up to 20%)
-    │
-    ▼
-Articles split into 3 pools (reshuffled every 3 articles):
-  ├── Liked category pool   → 45% of feed
-  ├── Trending pool         → 25% of feed
-  └── Random / explore      → 30% of feed
-    │
-    ▼
-You interact:
-  Like    → next 6 articles include 2–3 from that category
-  Dislike → that category capped at 1 in next 5 articles
-    │
-    ▼
-After 20 s of reading → poll overlay appears on the article card:
-  "Do you like this article?"
-  Yes (+0.10 preference) | No (−0.12 preference + skip)
-    │
-    ▼
-DDQN trains on every interaction
-→ Q-values update → better recommendations next time
-```
-
----
-
-## API Reference
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Health check |
-| `GET` | `/app` | Serve frontend UI |
-| `GET` | `/docs` | Swagger interactive docs |
-| `POST` | `/auth/signup` | Create a new account |
-| `POST` | `/auth/login` | Login, returns JWT token |
-| `POST` | `/onboard` | Set user interests and context |
-| `POST` | `/recommend` | Get top-k article recommendations |
-| `POST` | `/feedback` | Submit like / dislike / skip with attention data |
-| `POST` | `/poll_feedback` | Submit poll yes / no answer |
-| `POST` | `/update_model` | Trigger manual DDQN training step |
-| `GET` | `/user/{user_id}` | Get user profile and scores |
-| `GET` | `/users` | List all known user IDs |
-| `GET` | `/categories` | List all news categories |
-| `POST` | `/import_data` | Import CSVs into SQLite |
-| `GET` | `/attention` | Latest attention snapshot (JSON) |
-| `GET` | `/attention/frame` | Single JPEG frame from webcam |
-| `GET` | `/attention/stream` | MJPEG live camera stream |
-| `POST` | `/attention/start` | Start webcam backend |
-| `POST` | `/attention/stop` | Stop webcam backend |
-
-Full interactive docs: `http://localhost:8000/docs`
-
----
-
-## Database Tables
-
-| Table | Purpose |
-|---|---|
-| `users` | Profiles, attention / interaction / exploration scores |
-| `news` | Full article catalog from CSV |
-| `interactions` | Every like / skip / poll with all attention + scoring signals |
-| `user_category_prefs` | Per-user per-category preference (updated after every interaction) |
-| `category_stats` | Impressions, clicks, likes, avg dwell, trending score per category |
-| `user_memory` | Last 100 seen articles per user — prevents repetition |
-| `agent_state` | DDQN step counter, epsilon, category order per user |
-| `attention_events` | Raw webcam metrics snapshot per article view |
-
----
-
-## Interaction Score Formula
-
-```
-interaction_score = 0.55 × click_val
-                  + 0.10 × poll_val
-                  + 0.20 × log_dwell
-                  + 0.15 × long_term_history
-```
-
-| Component | Range | Meaning |
-|---|---|---|
-| `click_val` | 0 or 1 | Like = 1, skip / dislike = 0 |
-| `poll_val` | 0 / 0.5 / 1 | Poll No / No answer / Poll Yes |
-| `log_dwell` | 0 → 1 | Reading time normalized (60 s = 1.0) |
-| `long_term_history` | 0 → 1 | User's historical preference for this category |
-
----
-
-## Troubleshooting
-
-**`ModuleNotFoundError` on startup**
-```bash
-# Make sure venv is active, then:
-pip install -r final/requirements.txt
-```
-
-**No articles showing after onboarding**
-```bash
-curl -X POST http://localhost:8000/import_data
-# Verify CSV files exist in final/data/ or final/
-```
-
-**`FileNotFoundError` for CSV datasets**
-Place `news_transformed.csv` and `user_profile_scored.csv` (or `interaction_profile_scored_final.csv`) in `final/data/` or directly in `final/`.
-
-**Camera won't start**
-Close all apps using the camera (browsers, Zoom, Teams). If it still fails, edit `webcam_attention.py` and change `camera_index=0` to `camera_index=1`.
-
-**Cannot connect to `localhost:8000`**
-Make sure uvicorn is running and you're opening `http://localhost:8000/app` in the browser — not opening the HTML file directly.
-
-**Poll not appearing**
-The poll triggers after **20 seconds** on the same article. Watch the timer in the top bar.
-
-**Login keeps redirecting to login page**
-Token may have expired. Open browser DevTools → Application → Local Storage → Clear all, then log in again.
-
-**PyTorch `FutureWarning` about `weights_only`**
-Already handled in `ddqn_agent.py`. Safe to ignore if it still appears.
-
----
-
-## Running Tests
+### Local
 
 ```bash
 cd final
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
-# Simulate a full user session (headless, no browser needed)
-python tests/simulate_session.py
+python scripts/seed_demo_data.py --import   # one-time: generate + load demo data
 
-# Deep system audit — checks all major components
-python tests/deep_audit.py
+python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
----
+Open `http://127.0.0.1:8000/app` for the UI, `/docs` for interactive API
+docs.
 
-## Environment Variables
+### Running the tests
 
-| Variable | Default | Description |
-|---|---|---|
-| `ENABLE_WEBCAM_ATTENTION` | `0` | Set to `1` to auto-start webcam on server launch |
+```bash
+cd final
+pip install -r requirements-dev.txt
+pytest -v
+```
 
----
+## API overview
 
+| Group | Endpoints |
+|---|---|
+| Core loop | `POST /onboard`, `POST /recommend`, `POST /feedback`, `POST /poll_feedback` |
+| Auth | `POST /auth/signup`, `POST /auth/login`, `GET /auth/user/{id}`, `POST /auth/verify` |
+| Attention | `GET /attention`, `POST /attention/start`, `POST /attention/stop`, `GET /attention/stream` |
+| RL / graph / NLP introspection | `GET /rl/metrics/{user_id}`, `GET /graph/stats/{user_id}`, `GET /graph/top/{user_id}`, `GET /nlp/status`, `POST /nlp/score` |
+| Evaluation | `GET /eval/run` |
+| Ops | `GET /health`, `GET /metrics`, `GET /categories`, `GET /users` |
 
----
+Full interactive docs at `/docs` once the server is running.
+
+## Project layout
+
+```
+.
+├── final/
+│   ├── backend/main.py          FastAPI app, routing, observability middleware
+│   ├── recommender.py           Candidate retrieval + scoring + feedback loop
+│   ├── ddqn_agent.py            Dueling Double DQN
+│   ├── rl_policies.py           Thompson Sampling, UCB1, HybridPolicy blend
+│   ├── graph_memory.py          Time-decayed user↔category interest graph
+│   ├── nlp_engine.py            BM25 + TF-IDF + LSA ensemble retrieval
+│   ├── reranking.py             MMR diversity re-ranking
+│   ├── evaluation.py            Simulated-user offline evaluation harness
+│   ├── webcam_attention.py      OpenCV + MediaPipe attention pipeline
+│   ├── auth.py                  Token-based auth (PBKDF2-HMAC-SHA256)
+│   ├── database.py              SQLite schema + CSV import
+│   ├── config.py                Centralized settings (pydantic-settings)
+│   ├── cache.py / ratelimit.py / metrics.py / logging_config.py
+│   ├── scripts/seed_demo_data.py  Synthetic dataset generator
+│   ├── frontend/                 Editorial-style feed UI (vanilla HTML/CSS/JS)
+│   ├── tests/                    pytest suite
+│   ├── Dockerfile / docker-compose.yml
+│   └── .github/workflows/ci.yml (at repo root)
+```
+
+## Known limitations
+
+- The webcam attention pipeline needs a physical camera on the host; it's
+  disabled by default in Docker (`NEUROFEED_ENABLE_WEBCAM_ATTENTION=false`)
+  since containers don't get camera passthrough, and degrades gracefully
+  to a "no face detected" state either way.
+- The bundled dataset is synthetic (see above) — lexically coherent
+  enough for BM25/TF-IDF/LSA to do real work, but not real news.
+- The in-memory cache and rate limiter are single-process by design
+  (documented, Redis-shaped interface); a multi-instance deployment would
+  need to swap the backend, not the call sites.
+- The early-vs-late learning-delta metric is noisy over short simulated
+  episodes (small sample buckets) — treat it as a sanity check that the
+  system *can* learn within a session, not a precise benchmark.
