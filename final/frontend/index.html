@@ -11,6 +11,12 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <div class="app-layout">
+    <!-- SIDEBAR — category quick-links, only relevant once the feed is open -->
+    <aside class="sidebar hidden" id="sidebar">
+      <div class="sidebar-brand">NeuroFeed</div>
+      <nav class="sidebar-nav" id="sidebarCategories"></nav>
+    </aside>
     <main class="shell">
 
       <!-- ░░ ONBOARDING ░░ -->
@@ -89,6 +95,7 @@
                 <span id="userEmail">User</span>
               </button>
               <div class="menu-dropdown" id="menuDropdown" style="display: none;">
+                <a href="#" id="meLink" class="menu-item">Me</a>
                 <a href="#" id="settingsLink" class="menu-item">Settings</a>
                 <a href="#" id="logoutLink" class="menu-item">Logout</a>
               </div>
@@ -219,7 +226,20 @@
         </div>
       </aside>
 
+      <!-- ME PANEL — profile & stats, pulled from /user + /memory/summary -->
+      <div class="settings-overlay hidden" id="meOverlay"></div>
+      <aside class="settings-panel hidden" id="mePanel">
+        <div class="settings-head">
+          <h3>Me</h3>
+          <button class="settings-close" id="meClose" type="button" aria-label="Close profile">&times;</button>
+        </div>
+        <div class="settings-body me-body" id="meBody">
+          <p class="me-loading">Loading your profile…</p>
+        </div>
+      </aside>
+
     </main>
+    </div>
 
     <script src="config.js"></script>
     <script src="app.js"></script>

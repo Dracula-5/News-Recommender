@@ -142,13 +142,16 @@ async function authGet(path) {
 
 // ─── Data loading ─────────────────────────────────────────────
 
+let allCategories = [];
+
 async function loadCategories() {
   try {
     const res = await fetch(`${api}/categories`);
     const data = await res.json();
+    allCategories = data.categories || [];
     const container = $("interestOptions");
     container.innerHTML = "";
-    (data.categories || []).forEach((cat) => {
+    allCategories.forEach((cat) => {
       const label = document.createElement("label");
       label.className = "checkbox-item";
       const cb = document.createElement("input");
@@ -157,7 +160,57 @@ async function loadCategories() {
       label.append(cb, document.createTextNode(cat));
       container.appendChild(label);
     });
+    renderSidebarNav();
   } catch (e) { console.warn("loadCategories:", e); }
+}
+
+// ─── Sidebar ──────────────────────────────────────────────────
+// Category quick-links — click one to filter the feed down to just that
+// topic (threaded through as /recommend's `category` param), or "For You"
+// to clear the filter back to the normal personalized mix.
+
+let activeCategoryFilter = null; // null = normal mix, else a single category
+
+function renderSidebarNav() {
+  const nav = $("sidebarCategories");
+  if (!nav) return;
+  nav.innerHTML = "";
+
+  const buildLink = (cat, label) => {
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "sidebar-link";
+    link.dataset.category = cat || "";
+    const dot = document.createElement("span");
+    dot.className = "sidebar-link-dot";
+    link.append(dot, document.createTextNode(" " + label));
+    link.addEventListener("click", () => selectSidebarCategory(cat));
+    return link;
+  };
+
+  nav.appendChild(buildLink(null, "For You"));
+  allCategories.forEach((cat) => nav.appendChild(buildLink(cat, cat)));
+  syncSidebarHighlight();
+}
+
+function syncSidebarHighlight() {
+  document.querySelectorAll(".sidebar-link").forEach((link) => {
+    const cat = link.dataset.category || null;
+    link.classList.toggle("active", cat === activeCategoryFilter);
+  });
+}
+
+async function selectSidebarCategory(cat) {
+  if (activeCategoryFilter === cat) return;
+  activeCategoryFilter = cat;
+  syncSidebarHighlight();
+  prefetchedBatch = null; // stale — was fetched under the old filter
+  showToast(cat ? `Browsing ${cat}…` : "Back to your personalized feed…", "info", 1500);
+  try {
+    await refreshRecommendations();
+  } catch (e) {
+    // refreshRecommendations() already surfaced a toast on failure.
+  }
 }
 
 async function loadUserIds() {
@@ -599,10 +652,17 @@ let prefetchInFlight = false;
 async function prefetchNextBatch() {
   if (prefetchInFlight || prefetchedBatch) return;
   prefetchInFlight = true;
+  const filterAtRequestTime = activeCategoryFilter;
   try {
     const data = await post("/recommend", {
       user_id: userId, k: 8, mode: null, location: userLocation, mood: userMood,
+      category: filterAtRequestTime,
     });
+    // If the sidebar filter changed while this request was in flight, the
+    // batch it returned no longer matches what the user is now browsing —
+    // discard it rather than let refreshRecommendations() silently hand
+    // back the wrong topic next.
+    if (filterAtRequestTime !== activeCategoryFilter) return;
     prefetchedBatch = {
       recommendations: data.recommendations || [],
       mood: data.mood, mood_freshness: data.mood_freshness,
@@ -625,6 +685,7 @@ async function refreshRecommendations(mode = null) {
     try {
       const data = await post("/recommend", {
         user_id: userId, k: 8, mode, location: userLocation, mood: userMood,
+        category: activeCategoryFilter,
       });
       recommendations = data.recommendations || [];
       updateMoodIndicator(data.mood, data.mood_freshness);
@@ -640,6 +701,7 @@ async function refreshRecommendations(mode = null) {
   paintCard();
   await Promise.all([loadUserInfo(userId), loadUserIds()]);
   syncMoodChipHighlight();
+  syncSidebarHighlight();
 }
 
 // ─── Feedback ─────────────────────────────────────────────────
@@ -798,6 +860,7 @@ $("onboardForm").addEventListener("submit", async (e) => {
 
     $("onboarding").classList.add("hidden");
     $("feed").classList.remove("hidden");
+    $("sidebar")?.classList.remove("hidden");
 
     await loadUserInfo(userId);
     renderMoodChips();
@@ -981,6 +1044,193 @@ if (settingsLink) {
 $("settingsClose")?.addEventListener("click", closeSettings);
 $("settingsOverlay")?.addEventListener("click", closeSettings);
 $("settingsSave")?.addEventListener("click", saveSettings);
+
+// ─── Me panel ─────────────────────────────────────────────────
+// Profile & stats, built entirely from data the backend already exposes
+// (GET /user/{id}, GET /memory/summary/{id} — the same human-readable
+// digest of the knowledge graph the settings/recommend flow already
+// consumes as opaque numbers) — no new backend endpoint needed.
+
+function meStatCard(value, label) {
+  const card = document.createElement("div");
+  card.className = "me-stat";
+  const val = document.createElement("span");
+  val.className = "me-stat-value";
+  val.textContent = value;
+  const lab = document.createElement("span");
+  lab.className = "me-stat-label";
+  lab.textContent = label;
+  card.append(val, lab);
+  return card;
+}
+
+function meSectionLabel(text) {
+  const label = document.createElement("div");
+  label.className = "form-section-label";
+  label.textContent = text;
+  return label;
+}
+
+function meChipRow(items, variant = "") {
+  const wrap = document.createElement("div");
+  wrap.className = "me-chip-row";
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.className = "me-empty";
+    empty.textContent = "Not enough data yet.";
+    wrap.appendChild(empty);
+    return wrap;
+  }
+  items.forEach((it) => {
+    const chip = document.createElement("span");
+    chip.className = "me-chip" + (variant ? ` me-chip-${variant}` : "");
+    chip.textContent = it;
+    wrap.appendChild(chip);
+  });
+  return wrap;
+}
+
+async function loadMeContent() {
+  const body = $("meBody");
+  if (!body) return;
+  body.innerHTML = "";
+  const loading = document.createElement("p");
+  loading.className = "me-loading";
+  loading.textContent = "Loading your profile…";
+  body.appendChild(loading);
+
+  try {
+    const [user, summary] = await Promise.all([
+      authGet(`/user/${encodeURIComponent(userId)}`),
+      authGet(`/memory/summary/${encodeURIComponent(userId)}`),
+    ]);
+    body.innerHTML = "";
+
+    const header = document.createElement("div");
+    header.className = "me-header";
+    const idEl = document.createElement("div");
+    idEl.className = "me-id";
+    idEl.textContent = userId;
+    const metaEl = document.createElement("div");
+    metaEl.className = "me-meta";
+    const bits = [];
+    if (user.mood) bits.push(`feeling ${user.mood}`);
+    if (user.current_location) bits.push(user.current_location);
+    metaEl.textContent = bits.length ? bits.join(" · ") : "No mood or location set yet";
+    header.append(idEl, metaEl);
+    body.appendChild(header);
+
+    const stats = document.createElement("div");
+    stats.className = "me-stats";
+    stats.appendChild(meStatCard(String(summary.total_interactions ?? 0), "articles read"));
+    stats.appendChild(meStatCard(String((summary.top_interests || []).length), "top interests"));
+    stats.appendChild(meStatCard(`${Math.round((Number(user.exploration_signal) || 0) * 100)}%`, "exploratory"));
+    body.appendChild(stats);
+
+    body.appendChild(meSectionLabel("Top interests"));
+    body.appendChild(meChipRow(summary.top_interests || []));
+
+    if ((summary.rising_interests || []).length) {
+      body.appendChild(meSectionLabel("Rising"));
+      body.appendChild(meChipRow(summary.rising_interests, "rising"));
+    }
+    if ((summary.fading_interests || []).length) {
+      body.appendChild(meSectionLabel("Fading"));
+      body.appendChild(meChipRow(summary.fading_interests, "fading"));
+    }
+
+    const related = summary.related_categories || {};
+    const relatedKeys = Object.keys(related);
+    if (relatedKeys.length) {
+      body.appendChild(meSectionLabel("You might also like"));
+      const relatedWrap = document.createElement("div");
+      relatedWrap.className = "me-related";
+      relatedKeys.forEach((cat) => {
+        const row = document.createElement("div");
+        row.className = "me-related-row";
+        const from = document.createElement("span");
+        from.className = "me-related-from";
+        from.textContent = cat;
+        const arrow = document.createElement("span");
+        arrow.className = "me-related-arrow";
+        arrow.textContent = "→";
+        const to = document.createElement("span");
+        to.className = "me-related-to";
+        to.textContent = related[cat].join(", ");
+        row.append(from, arrow, to);
+        relatedWrap.appendChild(row);
+      });
+      body.appendChild(relatedWrap);
+    }
+
+    if (summary.first_seen) {
+      const since = document.createElement("p");
+      since.className = "me-since";
+      since.textContent = `Reading with NeuroFeed since ${summary.first_seen}`;
+      body.appendChild(since);
+    }
+  } catch (e) {
+    console.warn("loadMeContent:", e);
+    body.innerHTML = "";
+    const err = document.createElement("p");
+    err.className = "me-loading";
+    err.textContent = "Couldn't load your profile — try again in a moment.";
+    body.appendChild(err);
+  }
+}
+
+function openMe() {
+  const overlay = $("meOverlay");
+  const panel = $("mePanel");
+  if (!overlay || !panel) return;
+  overlay.classList.remove("hidden");
+  panel.classList.remove("hidden");
+  loadMeContent();
+}
+
+function closeMe() {
+  $("meOverlay")?.classList.add("hidden");
+  $("mePanel")?.classList.add("hidden");
+}
+
+const meLink = $("meLink");
+if (meLink) {
+  meLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menuDropdown) menuDropdown.style.display = "none";
+    openMe();
+  });
+}
+
+$("meClose")?.addEventListener("click", closeMe);
+$("meOverlay")?.addEventListener("click", closeMe);
+
+// ─── Hero 3D tilt ─────────────────────────────────────────────
+// Mouse-tracked perspective tilt on the hero image only (not the whole
+// .hero-article card, which owns the slide-in/out transition transform —
+// tilting that too would fight an inline style against the slide's CSS
+// classes mid-transition). Desktop-only by nature: no mousemove on touch,
+// so this is a no-op enhancement there, not a broken one.
+function initHeroTilt() {
+  const visual = $("heroVisual");
+  if (!visual) return;
+  const MAX_TILT_DEG = 7;
+
+  visual.addEventListener("mousemove", (e) => {
+    const rect = visual.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    const rotateY = (x - 0.5) * MAX_TILT_DEG * 2;
+    const rotateX = (0.5 - y) * MAX_TILT_DEG * 2;
+    visual.style.transform =
+      `perspective(700px) rotateX(${rotateX.toFixed(2)}deg) rotateY(${rotateY.toFixed(2)}deg) scale3d(1.015, 1.015, 1.015)`;
+  });
+  visual.addEventListener("mouseleave", () => {
+    visual.style.transform = "";
+  });
+}
+initHeroTilt();
 
 // ─── Init ─────────────────────────────────────────────────────
 
