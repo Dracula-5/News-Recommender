@@ -20,10 +20,12 @@ from typing import Any
 
 import numpy as np
 
+from config import get_settings
 from database import DB_PATH, db_connect, fetch_categories, import_csvs, init_db
 from ddqn_agent import DDQNAgent
 from graph_memory import UserInterestGraph
 from nlp_engine import EnhancedNLPEngine
+from reranking import mmr_select
 from utils import (
     category_preference_from_text,
     clamp,
@@ -56,6 +58,7 @@ def _time_features() -> tuple[float, float]:
 class NewsRecommender:
     def __init__(self, db_path: Path = DB_PATH) -> None:
         self.db_path = db_path
+        self.settings = get_settings()
         self._agents: dict[str, DDQNAgent] = {}
         self._nlp = EnhancedNLPEngine(n_lsa=64)
         self._graph = UserInterestGraph(db_path)
@@ -444,6 +447,10 @@ class NewsRecommender:
             liked_cats    = {r["category"] for r in recent_rows if r["liked"] == 1}
             disliked_cats = {r["category"] for r in recent_rows if r["liked"] == 0}
 
+            interaction_count = conn.execute(
+                "SELECT COUNT(*) FROM interactions WHERE user_id = ?", (user_id,)
+            ).fetchone()[0]
+
             candidates = self._fetch_candidates_conn(
                 conn, user_id, seen_news, blocked, pool_size=25,
                 location=location, force_mode=mode,
@@ -478,6 +485,18 @@ class NewsRecommender:
             "session_like_rate": session_like_rate,
         }
 
+        # ── cold-start weight blend ────────────────────────
+        # Below the interaction threshold the DDQN Q-values and Thompson
+        # Sampling rewards are still close to their untrained priors — they
+        # add noise, not signal. Lean instead on what's known immediately:
+        # the interests declared at onboarding (cat_pref, NLP similarity)
+        # and global trending, same as any RecSys cold-start blend.
+        is_cold_start = interaction_count < self.settings.cold_start_interaction_threshold
+        if is_cold_start:
+            weights = {"q": 0.10, "sim": 0.20, "trend": 0.20, "pref": 0.24, "graph": 0.06, "ts": 0.00}
+        else:
+            weights = {"q": 0.22, "sim": 0.20, "trend": 0.12, "pref": 0.10, "graph": 0.10, "ts": 0.06}
+
         # ── scoring inner function ────────────────────────
         def score_candidates(rows: list[dict], lc: set, dc: set) -> list[dict]:
             if not rows:
@@ -501,12 +520,12 @@ class NewsRecommender:
 
                 # Core scoring:  DDQN + NLP sim + trending + preference + graph + TS + attention
                 final = clamp(
-                    0.22 * q_norm
-                    + 0.20 * clamp(sim)
-                    + 0.12 * trend
-                    + 0.10 * cat_pref
-                    + 0.10 * g_score        # graph memory contribution
-                    + 0.06 * ts_rwd         # Thompson Sampling confidence
+                    weights["q"] * q_norm
+                    + weights["sim"] * clamp(sim)
+                    + weights["trend"] * trend
+                    + weights["pref"] * cat_pref
+                    + weights["graph"] * g_score   # graph memory contribution
+                    + weights["ts"] * ts_rwd       # Thompson Sampling confidence
                     + att_boost
                     + recency
                     + small_randomness()
@@ -588,8 +607,16 @@ class NewsRecommender:
                 filtered.append(item)
                 cat_count[cat] = cat_count.get(cat, 0) + 1
 
-        selected = filtered[:k]
-        random.shuffle(selected)
+        # MMR re-ranking: pick the final k trading relevance for diversity
+        # so the batch isn't five variations on the same story (see
+        # reranking.py). Falls back to same-category similarity if a
+        # candidate's LSA vector isn't available for any reason.
+        lsa_vectors = self._nlp.lsa_vectors_for_ids([item["news_id"] for item in filtered])
+        selected = mmr_select(
+            filtered, k,
+            vectors=lsa_vectors,
+            lambda_param=self.settings.mmr_lambda,
+        )
 
         logger.info(
             "recommend user=%s k=%s selected=%s",
@@ -601,6 +628,8 @@ class NewsRecommender:
             "k":                    k,
             "blocked_categories":   sorted(blocked),
             "recommendations":      selected,
+            "is_cold_start":        is_cold_start,
+            "interaction_count":    interaction_count,
         }
 
     # ──────────────────────────────────────────────────────

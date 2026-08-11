@@ -259,3 +259,19 @@ class EnhancedNLPEngine:
             return self._tfidf.transform([text])
         except Exception:
             return None
+
+    def lsa_vectors_for_ids(self, doc_ids: List[str]) -> Dict[str, np.ndarray]:
+        """
+        Look up the already-fitted LSA embedding for each doc_id (no
+        re-transform needed — used by MMR re-ranking to measure content
+        similarity *between candidates*, as opposed to `score_candidates`
+        which measures similarity to the user's query text).
+        """
+        if not self.fitted:
+            return {}
+        out: Dict[str, np.ndarray] = {}
+        for nid in doc_ids:
+            idx = self._doc_id_to_idx.get(nid)
+            if idx is not None:
+                out[nid] = self._lsa_matrix[idx]
+        return out
