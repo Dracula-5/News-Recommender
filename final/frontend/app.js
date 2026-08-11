@@ -246,6 +246,61 @@ async function selectMood(key, label) {
   }
 }
 
+// ─── Live News ────────────────────────────────────────────────
+// Real articles pulled server-side from NewsAPI.org (live_news.py) —
+// unlike everything else in the feed, these are display-only postcards
+// that open the original publisher's article in a new tab, not part of
+// the personalized/scored recommend() pipeline. Hidden entirely if no
+// NEUROFEED_NEWS_API_KEY is configured on the backend (data.configured).
+
+async function loadLiveNews() {
+  const section = $("liveNewsSection");
+  const row = $("liveNewsRow");
+  if (!row) return;
+  try {
+    const res = await fetch(`${api}/news/live?limit=10`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const articles = data.articles || [];
+    if (!data.configured || !articles.length) { section?.classList.add("hidden"); return; }
+
+    row.innerHTML = "";
+    articles.forEach((a) => {
+      const card = document.createElement("a");
+      card.className = "live-news-card";
+      card.href = a.url || "#";
+      card.target = "_blank";
+      card.rel = "noreferrer";
+
+      if (a.image_url) {
+        const img = document.createElement("img");
+        img.className = "live-news-img";
+        img.src = a.image_url;
+        img.alt = "";
+        img.loading = "lazy";
+        // A dead/blocked thumbnail shouldn't leave a broken-image icon in
+        // an otherwise clean editorial layout — just drop the <img>.
+        img.addEventListener("error", () => img.remove(), { once: true });
+        card.appendChild(img);
+      }
+
+      const body = document.createElement("div");
+      body.className = "live-news-body";
+      const src = document.createElement("span");
+      src.className = "live-news-source";
+      src.textContent = a.source_name || a.category || "News";
+      const headline = document.createElement("span");
+      headline.className = "live-news-headline";
+      headline.textContent = (a.abstract || "").split(".")[0].slice(0, 110);
+      body.append(src, headline);
+      card.appendChild(body);
+
+      row.appendChild(card);
+    });
+    section?.classList.remove("hidden");
+  } catch (e) { console.warn("loadLiveNews:", e); }
+}
+
 // ─── Trending Now ───────────────────────────────────────────────
 // Site-wide, not personalized — a separate signal from the adaptive feed
 // below it, surfaced so there's always something to look at even before
@@ -699,6 +754,7 @@ $("onboardForm").addEventListener("submit", async (e) => {
     renderMoodChips();
     await refreshRecommendations();
     loadTrending();
+    loadLiveNews();
 
     // Kick off silent background signals: camera-driven attention + always-on polling.
     startAttentionCapture();
