@@ -24,6 +24,7 @@ from config import get_settings
 from database import DB_PATH, db_connect, fetch_categories, import_csvs, init_db
 from ddqn_agent import DDQNAgent
 from graph_memory import UserInterestGraph
+from mood_signals import decayed_mood_affinity, mood_affinity, mood_decay_factor
 from nlp_engine import EnhancedNLPEngine
 from reranking import mmr_select
 from utils import (
@@ -122,7 +123,7 @@ class NewsRecommender:
             logger.warning("NLP engine init failed: %s", exc)
 
     # ──────────────────────────────────────────────────────
-    #  State builder  (10-D)
+    #  State builder  (11-D)
     # ──────────────────────────────────────────────────────
 
     def build_state_from_row(
@@ -133,7 +134,7 @@ class NewsRecommender:
         overrides: dict[str, Any] | None = None,
     ) -> list[float]:
         """
-        10-dimensional state vector:
+        11-dimensional state vector:
           [0] attention_score       — webcam / frontend attention
           [1] interaction_score     — dwell + clicks + poll
           [2] recent_activity       — smoothed recent engagement
@@ -144,6 +145,13 @@ class NewsRecommender:
           [7] time_sin              — cyclical hour encoding (sin)
           [8] time_cos              — cyclical hour encoding (cos)
           [9] session_like_rate     — recent like fraction
+          [10] mood_affinity        — decayed mood↔category affinity (mood_signals.py)
+
+        [10] starts from the heuristic prior in mood_signals.py, but it's
+        a real DDQN input, not just a fixed multiplier — over enough
+        feedback the network can learn this user's actual mood/category
+        associations diverge from the generic table (e.g. *this* user
+        reads business news when "stressed", not lifestyle content).
         """
         ov = overrides or {}
         time_sin, time_cos = _time_features()
@@ -158,6 +166,7 @@ class NewsRecommender:
             float(ov.get("time_sin", time_sin)),
             float(ov.get("time_cos", time_cos)),
             float(ov.get("session_like_rate", 0.5)),
+            float(ov.get("mood_affinities", {}).get(category, 0.5)),
         ]
 
     def build_state(self, user_id: str, category: str, overrides: dict | None = None) -> list[float]:
@@ -218,18 +227,25 @@ class NewsRecommender:
         attention     = 0.55 + min(float(payload.get("time_available", 10)) / 60.0, 0.25)
         interaction   = 0.45 + (0.15 if payload.get("sample_click") else 0.0)
 
+        onboard_mood = payload.get("mood", "") or ""
         with db_connect(self.db_path) as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO users
-                (user_id, user_interest_text, mood, time_available, time_of_day,
+                (user_id, user_interest_text, mood, mood_updated_at, time_available, time_of_day,
                  current_location, attention_score, interaction_score, recent_activity,
                  exploration_signal, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (
                     user_id, interest_text,
-                    payload.get("mood", ""),
+                    onboard_mood,
+                    # Only stamp mood_updated_at when a mood is actually
+                    # given — an unset mood shouldn't look "just set" to
+                    # mood_decay_factor() (see recommend()'s mood_freshness),
+                    # which would otherwise report full freshness for a
+                    # mood that was never really declared.
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S") if onboard_mood else None,
                     float(payload.get("time_available", 10)),
                     payload.get("time_of_day", ""),
                     payload.get("location", ""),
@@ -419,6 +435,25 @@ class NewsRecommender:
                 self.onboard_user({"user_id": user_id, "interests": [], "exploration_preference": 0.3})
                 user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
 
+            # ── "latest mood" ──────────────────────────────
+            # A `mood` that differs from what's stored is a fresh signal
+            # (the frontend's mood picker, or a settings change) — persist
+            # it with a fresh timestamp so it scores at full strength and
+            # decays from *now*. The frontend also echoes the already-
+            # stored mood on every normal /recommend call (it doesn't know
+            # whether the user changed anything), which is exactly the
+            # "unchanged" case below — that must NOT reset the timestamp,
+            # or mood would never decay during a normal active session.
+            stored_mood = user["mood"] or ""
+            incoming_mood = (mood or "").strip()
+            mood_just_changed = bool(incoming_mood and incoming_mood != stored_mood)
+            effective_mood = incoming_mood or stored_mood
+            if mood_just_changed:
+                conn.execute(
+                    "UPDATE users SET mood = ?, mood_updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (incoming_mood, user_id),
+                )
+
             blocked = {
                 r["category"]
                 for r in conn.execute(
@@ -521,6 +556,19 @@ class NewsRecommender:
         ts_rewards   = dict(zip(agent.categories, agent.hybrid.ts.get_expected_reward()))
         time_sin, time_cos = _time_features()
 
+        # ── mood affinity ──────────────────────────────────
+        # Fresh (decay=1.0) if the mood just changed this call — no point
+        # decaying a signal from the same instant it was set. Otherwise
+        # decayed from whenever it *was* last set (mood_signals.py).
+        if mood_just_changed:
+            mood_affinities = {cat: mood_affinity(effective_mood, cat) for cat in categories}
+        else:
+            mood_affinities = {
+                cat: decayed_mood_affinity(effective_mood, cat, user["mood_updated_at"])
+                for cat in categories
+            }
+        mood_freshness = 1.0 if mood_just_changed else mood_decay_factor(user["mood_updated_at"])
+
         state_overrides = {
             "attention_score":   current_attention,
             "graph_scores":      graph_scores,
@@ -528,6 +576,7 @@ class NewsRecommender:
             "time_sin":          time_sin,
             "time_cos":          time_cos,
             "session_like_rate": session_like_rate,
+            "mood_affinities":   mood_affinities,
         }
 
         # ── cold-start weight blend ────────────────────────
@@ -535,12 +584,16 @@ class NewsRecommender:
         # Sampling rewards are still close to their untrained priors — they
         # add noise, not signal. Lean instead on what's known immediately:
         # the interests declared at onboarding (cat_pref, NLP similarity)
-        # and global trending, same as any RecSys cold-start blend.
+        # and global trending, same as any RecSys cold-start blend. Mood
+        # gets slightly *more* weight cold-start-side too — it's available
+        # immediately (no training needed) and, same reasoning as
+        # cat_pref, is a much stronger signal than Q/TS before either has
+        # learned anything.
         is_cold_start = interaction_count < self.settings.cold_start_interaction_threshold
         if is_cold_start:
-            weights = {"q": 0.10, "sim": 0.20, "trend": 0.20, "pref": 0.24, "graph": 0.06, "ts": 0.00}
+            weights = {"q": 0.08, "sim": 0.18, "trend": 0.18, "pref": 0.20, "graph": 0.06, "ts": 0.00, "mood": 0.10}
         else:
-            weights = {"q": 0.22, "sim": 0.20, "trend": 0.12, "pref": 0.10, "graph": 0.10, "ts": 0.06}
+            weights = {"q": 0.20, "sim": 0.18, "trend": 0.11, "pref": 0.09, "graph": 0.09, "ts": 0.05, "mood": 0.08}
 
         # ── scoring inner function ────────────────────────
         def score_candidates(rows: list[dict], lc: set, dc: set) -> list[dict]:
@@ -561,9 +614,10 @@ class NewsRecommender:
                 cat_pref   = all_prefs.get(cat, 0.2)
                 g_score    = graph_scores.get(cat, 0.5)
                 ts_rwd     = ts_rewards.get(cat, 0.5)
+                mood_aff   = mood_affinities.get(cat, 0.5)
                 att_boost  = 0.20 * current_attention * (1.2 if attention_source == "webcam" else 1.0)
 
-                # Core scoring:  DDQN + NLP sim + trending + preference + graph + TS + attention
+                # Core scoring:  DDQN + NLP sim + trending + preference + graph + TS + mood + attention
                 final = clamp(
                     weights["q"] * q_norm
                     + weights["sim"] * clamp(sim)
@@ -571,6 +625,7 @@ class NewsRecommender:
                     + weights["pref"] * cat_pref
                     + weights["graph"] * g_score   # graph memory contribution
                     + weights["ts"] * ts_rwd       # Thompson Sampling confidence
+                    + weights["mood"] * mood_aff   # latest-mood category affinity, decayed
                     + att_boost
                     + recency
                     + small_randomness()
@@ -686,6 +741,8 @@ class NewsRecommender:
             "recommendations":      selected,
             "is_cold_start":        is_cold_start,
             "interaction_count":    interaction_count,
+            "mood":                 effective_mood or None,
+            "mood_freshness":       round(mood_freshness, 4),
         }
 
     # ──────────────────────────────────────────────────────
@@ -782,7 +839,20 @@ class NewsRecommender:
 
         long_term_history = clamp(all_prefs.get(category, 0.2))
         interaction_score = compute_interaction_score(click_val, poll_val, time_spent, long_term_history)
-        reward            = compute_reward(liked, time_spent, similarity, scroll_depth)
+
+        # feedback() doesn't accept a mood change (only recommend() does —
+        # see its "latest mood" block) so there's no before/after mood shift
+        # to model here, just the same decayed affinity read once and
+        # reused for the reward's mood-congruence shaping, and for state
+        # and next_state below.
+        mood_affinities = {
+            cat: decayed_mood_affinity(user_row["mood"] or "", cat, user_row["mood_updated_at"])
+            for cat in self.categories()
+        }
+        reward = compute_reward(
+            liked, time_spent, similarity, scroll_depth,
+            mood_congruence=mood_affinities.get(category, 0.5),
+        )
 
         # ── build "before" state ───────────────────────────
         # Snapshot graph scores *before* recording this interaction so
@@ -812,6 +882,7 @@ class NewsRecommender:
             "time_sin":          time_sin,
             "time_cos":          time_cos,
             "session_like_rate": session_like_rate,
+            "mood_affinities":   mood_affinities,
         }
         state = self.build_state_from_row(user_row, category, all_prefs, state_overrides)
 

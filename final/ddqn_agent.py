@@ -2,12 +2,19 @@
 Dueling Double DQN agent for news category selection.
 
 Changes vs. original:
-  * State dimension expanded from 5 → 10 (richer context)
+  * State dimension expanded 5 → 10 → 11 (richer context, most recently a
+    mood_affinity dimension — see build_state_from_row in recommender.py
+    and mood_signals.py)
   * Deeper network: 256 → 128 → (value / advantage heads)
   * LayerNorm after first layer for training stability
   * HybridPolicy (Thompson Sampling + UCB) replaces plain ε-greedy
   * Hybrid policy state saved/loaded alongside model weights
-  * Graceful architecture-mismatch recovery (old 5-D → new 10-D)
+  * Graceful architecture-mismatch recovery (old 5-D/10-D → new 11-D) —
+    a per-user checkpoint saved under the old shape doesn't crash, it
+    just reinitializes for that user (see _load_or_init below); expanding
+    the state dimension trades a one-time reset of existing per-user
+    DDQN progress for a genuinely richer state going forward, not a free
+    change, and not one to make casually
 """
 from __future__ import annotations
 
@@ -31,7 +38,7 @@ from rl_policies import HybridPolicy
 
 logger = logging.getLogger(__name__)
 
-STATE_DIM = 10          # see build_state_from_row in recommender.py
+STATE_DIM = 11          # see build_state_from_row in recommender.py
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
@@ -52,10 +59,10 @@ _SAVE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ddqn-save
 
 class DuelingDQN(nn.Module):
     """
-    Dueling network with LayerNorm for stable learning on the 10-D state.
+    Dueling network with LayerNorm for stable learning on the 11-D state.
 
     Architecture:
-      input(10) → Linear(256) → LayerNorm(256) → ReLU
+      input(11) → Linear(256) → LayerNorm(256) → ReLU
                 → Linear(128) → ReLU
                 ┌→ value_head:     Linear(64) → ReLU → Linear(1)
                 └→ advantage_head: Linear(64) → ReLU → Linear(n_actions)

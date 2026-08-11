@@ -230,6 +230,15 @@ def init_db(db_path: Path = DB_PATH) -> None:
             # interaction (see graph_memory.py::_node_score_locked).
             conn.execute("ALTER TABLE graph_edges ADD COLUMN avg_reward REAL DEFAULT 0")
 
+        existing_user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "mood_updated_at" not in existing_user_cols:
+            # When `mood` was last set — not the same as `updated_at`,
+            # which touches on every attention/interaction score update
+            # too. recommend()/feedback() decay mood's influence on
+            # scoring based on this timestamp (see mood_signals.py) — a
+            # mood set days ago shouldn't still be steering the feed.
+            conn.execute("ALTER TABLE users ADD COLUMN mood_updated_at TEXT")
+
 
 def normalize_user_columns(df: pd.DataFrame) -> pd.DataFrame:
     defaults = {

@@ -37,15 +37,27 @@ def compute_reward(
     time_spent: float,
     similarity: float = 0.0,
     scroll_depth: float = 0.0,
+    mood_congruence: float = 0.5,
 ) -> float:
     """
     Multi-signal HITL reward:
-      ±2.0  explicit like / dislike
-      ±1.2  dwell-time bonus/penalty  (> 6 s good, < 2 s bad)
-      +0.50 similarity match bonus
-      +0.40 deep scroll bonus  (scroll_depth > 0.7 → strong engagement)
-      −0.20 shallow scroll on skip  (scroll_depth < 0.15)
-    Range approx [−3.4, +4.1]
+      ±2.0   explicit like / dislike
+      ±1.2   dwell-time bonus/penalty  (> 6 s good, < 2 s bad)
+      +0.50  similarity match bonus
+      +0.40  deep scroll bonus  (scroll_depth > 0.7 → strong engagement)
+      −0.20  shallow scroll on skip  (scroll_depth < 0.15)
+      ±0.15  mood-congruence shaping — see below
+    Range approx [−3.55, +4.25]
+
+    mood_congruence is the decayed mood↔category affinity for this article
+    (mood_signals.py), in [0, 1] with 0.5 = neutral/no active mood. It's a
+    *shaping* term, not an independent reward for matching the mood — it
+    only bites when combined with the like/dislike outcome:
+      - liked + congruent (>0.5):    small extra credit (mood predicted well)
+      - disliked + congruent:        small extra penalty (mood predicted wrong)
+      - liked + incongruent (<0.5):  small penalty (liked despite the mismatch)
+      - disliked + incongruent:      small credit back (an unsurprising miss)
+    A neutral 0.5 (no mood set, or fully decayed) is a no-op by construction.
     """
     reward = 2.0 if int(liked) == 1 else -2.0
     if time_spent > 6:
@@ -58,6 +70,8 @@ def compute_reward(
         reward += 0.40
     elif depth < 0.15 and not liked:
         reward -= 0.20
+    mood_delta = clamp(mood_congruence) - 0.5
+    reward += 0.30 * mood_delta if liked else -0.30 * mood_delta
     return round(reward, 4)
 
 

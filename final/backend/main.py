@@ -486,8 +486,14 @@ def update_interests(user_id: str, payload: InterestsUpdatePayload, authorizatio
             updates.append("user_interest_text = ?")
             params.append(interest_text)
         if payload.mood:
+            # A settings-panel mood edit is a fresh signal exactly like the
+            # frontend's mood picker (see recommender.py's "latest mood"
+            # handling in recommend()) — stamp mood_updated_at too, or this
+            # mood would be treated as already stale by mood_signals.py's
+            # decay math.
             updates.append("mood = ?")
             params.append(payload.mood)
+            updates.append("mood_updated_at = CURRENT_TIMESTAMP")
         if payload.exploration_preference is not None:
             updates.append("exploration_signal = ?")
             params.append(clamp(payload.exploration_preference))
