@@ -96,6 +96,13 @@
           <div class="masthead-rule"></div>
         </header>
 
+        <!-- MOOD BAR — tunes recommendations to how the user feels right now -->
+        <section class="mood-bar">
+          <span class="mood-bar-label">Feeling</span>
+          <div class="mood-chips" id="moodChips"></div>
+          <span class="mood-tuned hidden" id="moodTuned"></span>
+        </section>
+
         <!-- TRENDING NOW -->
         <section class="trending-section hidden" id="trendingSection">
           <div class="trending-head">
@@ -133,11 +140,11 @@
           </div>
 
           <div class="actions-row">
-            <button id="skipBtn" class="action-link">Not interested</button>
+            <button id="skipBtn" class="action-link" title="Shortcut: D">Not interested <kbd>D</kbd></button>
             <span class="action-sep">·</span>
-            <button id="likeBtn" class="action-link action-like">Useful</button>
+            <button id="likeBtn" class="action-link action-like" title="Shortcut: L">Useful <kbd>L</kbd></button>
             <span class="action-sep">·</span>
-            <button id="nextBtn" class="action-link">Next article →</button>
+            <button id="nextBtn" class="action-link" title="Shortcut: N">Next article → <kbd>N</kbd></button>
           </div>
         </article>
 

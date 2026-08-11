@@ -251,6 +251,57 @@ button:active { filter: brightness(0.94); }
 }
 .masthead-rule::after { content: ""; }
 
+/* ── Mood bar ──────────────────────────────────────────────── */
+.mood-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+
+.mood-bar-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.mood-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mood-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--ink2);
+  padding: 5px 11px;
+  font-size: 0.78rem;
+  font-family: var(--sans);
+  border-radius: 100px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.mood-chip:hover { border-color: var(--red); color: var(--red); }
+.mood-chip.active {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.mood-tuned {
+  font-size: 0.76rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
 /* ── Hero article ──────────────────────────────────────────── */
 .hero-article {
   display: flex;
@@ -383,6 +434,20 @@ button:active { filter: brightness(0.94); }
 .action-link:hover { color: var(--red); filter: none; }
 .action-like { color: var(--red); }
 .action-sep { color: var(--border2); }
+
+.action-link kbd {
+  display: inline-block;
+  margin-left: 4px;
+  font-family: var(--sans);
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--muted);
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  vertical-align: middle;
+}
+.action-link:hover kbd { color: var(--red); border-color: var(--red); }
 
 /* ── Poll (inline, understated) ───────────────────────────── */
 .poll {

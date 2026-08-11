@@ -176,6 +176,76 @@ function selectedInterests() {
   return Array.from(document.querySelectorAll("#interestOptions input:checked")).map(i => i.value);
 }
 
+// ─── Mood bar ─────────────────────────────────────────────────
+// Mirrors mood_signals.py's MOOD_CATEGORY_AFFINITY keys on the backend —
+// picking a chip here is a "latest mood wins" signal (see recommender.py's
+// recommend()): it overwrites the stored mood with a fresh timestamp and
+// re-scores the feed toward mood-congruent categories immediately, then
+// decays back to neutral over a few hours if left untouched.
+const MOOD_OPTIONS = [
+  { key: "curious",   emoji: "🧐", label: "Curious" },
+  { key: "focused",   emoji: "🎯", label: "Focused" },
+  { key: "relaxed",   emoji: "😌", label: "Relaxed" },
+  { key: "energetic", emoji: "⚡", label: "Energetic" },
+  { key: "stressed",  emoji: "😤", label: "Stressed" },
+  { key: "tired",     emoji: "🥱", label: "Tired" },
+  { key: "busy",      emoji: "🏃", label: "Busy" },
+  { key: "happy",     emoji: "😊", label: "Happy" },
+  { key: "anxious",   emoji: "😰", label: "Anxious" },
+];
+
+function renderMoodChips() {
+  const container = $("moodChips");
+  if (!container) return;
+  container.innerHTML = "";
+  MOOD_OPTIONS.forEach(({ key, emoji, label }) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "mood-chip";
+    chip.dataset.mood = key;
+    if (key === userMood) chip.classList.add("active");
+    chip.append(document.createTextNode(`${emoji} ${label}`));
+    chip.addEventListener("click", () => selectMood(key, label));
+    container.appendChild(chip);
+  });
+}
+
+function syncMoodChipHighlight() {
+  document.querySelectorAll(".mood-chip").forEach((chip) => {
+    chip.classList.toggle("active", chip.dataset.mood === userMood);
+  });
+}
+
+// freshness in [0,1] — 1.0 = just set, decaying toward 0 (mood_signals.py's
+// 4-hour half-life). Rendered as a fading hint rather than a hard cutoff,
+// since the backend blend degrades the same way (toward neutral, not off).
+function updateMoodIndicator(mood, freshness) {
+  const el = $("moodTuned");
+  if (!el) return;
+  if (!mood || !freshness || freshness < 0.05) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  el.textContent = freshness > 0.9
+    ? `Tuned for ${mood} right now`
+    : `Still leaning ${mood}`;
+  el.classList.remove("hidden");
+}
+
+async function selectMood(key, label) {
+  if (userMood === key) return;
+  userMood = key;
+  syncMoodChipHighlight();
+  prefetchedBatch = null; // stale — was fetched under the old mood
+  showToast(`Tuning your feed for ${label.toLowerCase()}…`, "info", 1800);
+  try {
+    await refreshRecommendations();
+  } catch (e) {
+    // refreshRecommendations() already surfaced a toast on failure.
+  }
+}
+
 // ─── Trending Now ───────────────────────────────────────────────
 // Site-wide, not personalized — a separate signal from the adaptive feed
 // below it, surfaced so there's always something to look at even before
@@ -450,7 +520,10 @@ async function prefetchNextBatch() {
     const data = await post("/recommend", {
       user_id: userId, k: 8, mode: null, location: userLocation, mood: userMood,
     });
-    prefetchedBatch = data.recommendations || [];
+    prefetchedBatch = {
+      recommendations: data.recommendations || [],
+      mood: data.mood, mood_freshness: data.mood_freshness,
+    };
   } catch (e) {
     // Silent — refreshRecommendations() will just fetch fresh when needed.
   } finally {
@@ -461,7 +534,8 @@ async function prefetchNextBatch() {
 async function refreshRecommendations(mode = null) {
   let recommendations;
   if (!mode && prefetchedBatch) {
-    recommendations = prefetchedBatch;
+    recommendations = prefetchedBatch.recommendations;
+    updateMoodIndicator(prefetchedBatch.mood, prefetchedBatch.mood_freshness);
     prefetchedBatch = null;
   } else {
     beginLoading();
@@ -470,6 +544,7 @@ async function refreshRecommendations(mode = null) {
         user_id: userId, k: 8, mode, location: userLocation, mood: userMood,
       });
       recommendations = data.recommendations || [];
+      updateMoodIndicator(data.mood, data.mood_freshness);
     } catch (e) {
       showToast("Couldn't load new recommendations — retrying next action.", "error");
       throw e;
@@ -481,6 +556,7 @@ async function refreshRecommendations(mode = null) {
   currentIndex = 0;
   paintCard();
   await Promise.all([loadUserInfo(userId), loadUserIds()]);
+  syncMoodChipHighlight();
 }
 
 // ─── Feedback ─────────────────────────────────────────────────
@@ -620,6 +696,7 @@ $("onboardForm").addEventListener("submit", async (e) => {
     $("feed").classList.remove("hidden");
 
     await loadUserInfo(userId);
+    renderMoodChips();
     await refreshRecommendations();
     loadTrending();
 
@@ -636,6 +713,26 @@ $("onboardForm").addEventListener("submit", async (e) => {
 $("likeBtn").addEventListener("click", () => sendFeedback(1, 0));
 $("skipBtn").addEventListener("click", () => sendFeedback(0, 1));
 $("nextBtn").addEventListener("click", () => sendFeedback(0, 1, true));
+
+// ─── Keyboard shortcuts ─────────────────────────────────────
+// L = like, D = not interested (dislike), N = next article, same actions
+// as the three buttons above. Ignored while typing anywhere (onboarding
+// form, settings panel) or before the feed is actually open, so a normal
+// "n" in a text field never gets hijacked.
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if ($("feed")?.classList.contains("hidden")) return;
+  if (!$("settingsPanel")?.classList.contains("hidden")) return;
+  if (!currentItem()) return;
+
+  switch (e.key.toLowerCase()) {
+    case "l": e.preventDefault(); sendFeedback(1, 0); break;
+    case "d": e.preventDefault(); sendFeedback(0, 1); break;
+    case "n": e.preventDefault(); sendFeedback(0, 1, true); break;
+  }
+});
 
 // ─── Reading timer (updates the small byline label only) ──────
 
