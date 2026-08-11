@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NeuroFeed</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700;8..60,900&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+
+      <!-- ░░ ONBOARDING ░░ -->
+      <section class="panel onboarding" id="onboarding">
+        <div class="ob-hero">
+          <p class="ob-kicker">NeuroFeed</p>
+          <h1>News that reads <em>you</em>.</h1>
+          <p class="lede">Your feed adapts after every article you read — shaped quietly by attention, mood, time of day and location.</p>
+        </div>
+
+        <form id="onboardForm" class="form">
+          <div class="form-section-label">Identity</div>
+          <label>
+            User ID
+            <input name="user_id" placeholder="Leave blank to auto-generate" list="userOptions" />
+            <datalist id="userOptions"></datalist>
+          </label>
+
+          <div class="form-section-label">Interests</div>
+          <div id="interestOptions" class="checkbox-grid"></div>
+
+          <div class="form-section-label">Context</div>
+          <div class="grid-2">
+            <label>
+              Mood
+              <input name="mood" placeholder="focused, curious…" value="curious" />
+            </label>
+            <label>
+              Minutes available
+              <input name="time_available" type="number" value="12" min="1" max="120" />
+            </label>
+          </div>
+          <div class="grid-2">
+            <label>
+              Time of day
+              <select name="time_of_day">
+                <option>morning</option>
+                <option>afternoon</option>
+                <option>evening</option>
+                <option>late_night</option>
+              </select>
+            </label>
+            <label>
+              Location
+              <input name="location" value="India" />
+            </label>
+          </div>
+
+          <div class="form-section-label">Tuning</div>
+          <label>
+            Exploration preference
+            <div class="slider-row">
+              <span class="slider-lo">Focused</span>
+              <input name="exploration_preference" type="range" min="0" max="1" step="0.05" value="0.25" />
+              <span class="slider-hi">Exploratory</span>
+            </div>
+          </label>
+          <label>
+            Sample click category
+            <input name="sample_click" placeholder="technology" value="technology" />
+          </label>
+
+          <button type="submit" class="btn-primary btn-lg">Open my feed →</button>
+        </form>
+      </section>
+
+      <!-- ░░ FEED ░░ -->
+      <section class="feed hidden" id="feed">
+
+        <!-- MASTHEAD -->
+        <header class="masthead">
+          <div class="masthead-row">
+            <span class="wordmark">NeuroFeed</span>
+            <div class="user-menu" id="userMenu">
+              <button class="btn-user" id="userMenuBtn" type="button">
+                <span id="userEmail">User</span>
+              </button>
+              <div class="menu-dropdown" id="menuDropdown" style="display: none;">
+                <a href="#" id="logoutLink" class="menu-item">Logout</a>
+              </div>
+            </div>
+          </div>
+          <div class="masthead-rule"></div>
+        </header>
+
+        <!-- HERO ARTICLE -->
+        <article class="hero-article" id="card">
+          <div class="hero-visual" id="heroVisual">
+            <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+            <span class="hero-cat-watermark" id="heroWatermark">News</span>
+          </div>
+
+          <span id="category" class="chip-category">Category</span>
+          <h1 id="headline">Ready when you are.</h1>
+
+          <div class="byline-row">
+            <span class="byline">NEUROFEED DESK</span>
+            <span class="byline-sep">·</span>
+            <span id="readTimer" class="byline-timer">just now</span>
+          </div>
+
+          <p id="abstract">Open your feed to get your first recommendation.</p>
+          <a id="url" href="#" target="_blank" rel="noreferrer" class="read-link hidden">Read full article ↗</a>
+
+          <!-- Inline poll — appears after a while if attention drops -->
+          <div id="pollPrompt" class="poll hidden">
+            <p>Still with <strong>&ldquo;<span id="pollArticleName">this article</span>&rdquo;</strong>?</p>
+            <div class="poll-btns">
+              <button id="pollYes" class="btn-ghost">Yes</button>
+              <button id="pollNo" class="btn-ghost">No</button>
+            </div>
+          </div>
+
+          <div class="actions-row">
+            <button id="skipBtn" class="action-link">Not interested</button>
+            <span class="action-sep">·</span>
+            <button id="likeBtn" class="action-link action-like">Useful</button>
+            <span class="action-sep">·</span>
+            <button id="nextBtn" class="action-link">Next article →</button>
+          </div>
+        </article>
+
+        <!-- LIVE UPDATES -->
+        <section class="updates-section">
+          <div class="updates-head">
+            <span class="live-dot small"></span>
+            <h2>Live Updates</h2>
+          </div>
+          <ol id="queueList" class="updates-list"></ol>
+        </section>
+
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

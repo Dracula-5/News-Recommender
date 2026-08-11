@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment / secrets
+.env
+.env.local
+
+# Data & generated artifacts
+*.sqlite
+*.sqlite3
+*.csv
+*.log
+final/data/*.sqlite
+final/models/*.pt
+!final/models/.gitkeep
+
+# Node (frontend tooling, if ever added)
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code local settings
+**/.claude/settings.local.json

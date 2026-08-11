@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - NeuroFeed</title>
+    <link rel="stylesheet" href="auth.css">
+</head>
+<body>
+    <div class="auth-container">
+        <div class="auth-card">
+            <!-- Logo/Title -->
+            <div class="auth-header">
+                <h1 class="logo">NeuroFeed</h1>
+                <p class="tagline">News that reads you</p>
+            </div>
+
+            <!-- Login Form -->
+            <form id="loginForm" class="auth-form">
+                <div class="form-group">
+                    <label for="email">Email</label>
+                    <input 
+                        type="email" 
+                        id="email" 
+                        name="email" 
+                        placeholder="you@example.com"
+                        required
+                    >
+                    <span class="error-message" id="emailError"></span>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input 
+                        type="password" 
+                        id="password" 
+                        name="password" 
+                        placeholder="••••••••"
+                        required
+                    >
+                    <span class="error-message" id="passwordError"></span>
+                </div>
+
+                <!-- General Error Message -->
+                <div class="error-message" id="generalError"></div>
+
+                <!-- Loading State -->
+                <button 
+                    type="submit" 
+                    id="loginBtn" 
+                    class="btn btn-primary btn-large"
+                >
+                    <span class="btn-text">Sign In</span>
+                    <span class="btn-loader"></span>
+                </button>
+            </form>
+
+            <!-- Divider -->
+            <div class="divider">
+                <span>or</span>
+            </div>
+
+            <!-- Continue as Guest -->
+            <button id="guestBtn" class="btn btn-secondary btn-large">
+                Continue as Guest
+            </button>
+
+            <!-- Signup Link -->
+            <div class="auth-footer">
+                <p>Don't have an account? <a href="signup.html" class="link">Sign up</a></p>
+                <p><a href="index.html" class="link">Back to App</a></p>
+            </div>
+        </div>
+
+        <!-- Background Gradient -->
+        <div class="gradient-bg"></div>
+    </div>
+
+    <script src="auth.js"></script>
+    <script>
+        // Login Form Handler
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await handleLogin();
+        });
+
+        // Guest Button Handler
+        document.getElementById('guestBtn').addEventListener('click', async () => {
+            const guestId = 'guest_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('userId', guestId);
+            localStorage.setItem('isGuest', 'true');
+            window.location.href = 'index.html';
+        });
+
+        async function handleLogin() {
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const loginBtn = document.getElementById('loginBtn');
+            const generalError = document.getElementById('generalError');
+
+            // Clear previous errors
+            clearErrors();
+
+            // Validation
+            if (!email) {
+                document.getElementById('emailError').textContent = 'Email is required';
+                return;
+            }
+
+            if (!isValidEmail(email)) {
+                document.getElementById('emailError').textContent = 'Invalid email format';
+                return;
+            }
+
+            if (!password || password.length < 6) {
+                document.getElementById('passwordError').textContent = 'Password must be at least 6 characters';
+                return;
+            }
+
+            // Show loading state
+            setButtonLoading(loginBtn, true);
+
+            try {
+                const response = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Store auth token and user info
+                    localStorage.setItem('userId', data.user_id);
+                    localStorage.setItem('username', data.username);
+                    localStorage.setItem('userEmail', data.email);
+                    localStorage.setItem('token', data.token);
+                    localStorage.removeItem('isGuest');
+                    
+                    // Redirect to app
+                    window.location.href = 'index.html';
+                } else {
+                    generalError.textContent = data.detail || 'Login failed. Please try again.';
+                }
+            } catch (error) {
+                generalError.textContent = 'Connection error. Please try again.';
+                console.error('Login error:', error);
+            } finally {
+                setButtonLoading(loginBtn, false);
+            }
+        }
+
+        function clearErrors() {
+            document.getElementById('emailError').textContent = '';
+            document.getElementById('passwordError').textContent = '';
+            document.getElementById('generalError').textContent = '';
+        }
+
+        function isValidEmail(email) {
+            return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+        }
+
+        function setButtonLoading(btn, isLoading) {
+            if (isLoading) {
+                btn.disabled = true;
+                btn.classList.add('loading');
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('loading');
+            }
+        }
+    </script>
+</body>
+</html>
