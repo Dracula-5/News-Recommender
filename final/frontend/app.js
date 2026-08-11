@@ -1,4 +1,7 @@
-const api = "http://localhost:8000";
+// Set by config.js (loaded before this file) — auto-detects localhost in
+// dev, points at the deployed backend (Render, etc.) in production. Never
+// hardcode a host here; edit config.js instead.
+const api = window.NEUROFEED_API_BASE || "http://localhost:8000";
 
 // ─── Authentication Check ──────────────────────────────────────
 

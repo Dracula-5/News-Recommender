@@ -1,0 +1,31 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploy: on Render, "New +" -> "Blueprint" -> connect this repo. Render
+# reads this file and pre-fills everything below; you only need to fill in
+# NEUROFEED_CORS_ORIGINS with your actual Netlify URL once you have it
+# (Render will prompt for any envVar with no `value`, i.e. sync: false).
+#
+# Not using a Blueprint? These are the same values to paste into a manually
+# created Web Service — see the "Root Directory" / "Build Command" /
+# "Start Command" fields in the Render dashboard.
+services:
+  - type: web
+    name: neurofeed-api
+    runtime: python
+    plan: free
+    rootDir: final
+    buildCommand: pip install -r requirements.txt
+    # Seeds the synthetic demo dataset if the DB is empty (idempotent —
+    # see scripts/seed_demo_data.py), then starts the API. Render sets
+    # $PORT; the app must bind to it, not a hardcoded port.
+    startCommand: python scripts/seed_demo_data.py --import && python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: NEUROFEED_ENV
+        value: production
+      - key: NEUROFEED_ENABLE_WEBCAM_ATTENTION
+        value: "false"
+      - key: NEUROFEED_CORS_ORIGINS
+        sync: false # fill in with your Netlify URL, e.g. https://your-site.netlify.app

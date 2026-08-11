@@ -1,0 +1,24 @@
+# Netlify config — https://docs.netlify.com/configure-builds/file-based-configuration/
+#
+# Deploy: on Netlify, "Add new site" -> "Import an existing project" ->
+# connect this repo. Netlify reads this file and needs no fields filled
+# in manually (no build step — it's static HTML/CSS/JS).
+#
+# After deploying the backend to Render, two edits are still needed
+# (can't be done from this file alone — they depend on your actual URLs):
+#   1. frontend/config.js — replace the placeholder with your Render URL.
+#   2. connect-src below — replace the placeholder with the same URL.
+[build]
+  publish = "final/frontend"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    # Mirrors backend/main.py's _SECURITY_HEADERS CSP, except connect-src
+    # additionally allows the Render backend (a different origin now that
+    # the frontend is split out to Netlify).
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://YOUR-RENDER-SERVICE.onrender.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"

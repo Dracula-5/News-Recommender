@@ -259,6 +259,103 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
+## Deploying to Render + Netlify
+
+Splitting frontend and backend across two hosts is a different shape than
+the Docker/local setup above — those serve the frontend *from* the
+backend (`app.mount("/app", ...)` in `main.py`). Split across two
+origins, the frontend needs to know the backend's URL and the backend
+needs to allow the frontend's origin. `render.yaml` and `netlify.toml` at
+the repo root pre-fill almost everything; two edits still need your
+actual URLs, which don't exist until you've deployed once.
+
+### 1. Backend on Render
+
+**Via Blueprint (recommended)** — Render dashboard → **New +** → **Blueprint** →
+connect this repo. It reads `render.yaml` and creates the service with:
+
+| Field | Value |
+|---|---|
+| Root Directory | `final` |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `python scripts/seed_demo_data.py --import && python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT` |
+| Health Check Path | `/health` |
+
+It'll prompt you for `NEUROFEED_CORS_ORIGINS` — leave it blank for now,
+you don't have the Netlify URL yet (step 3 comes back to this).
+
+**Via the dashboard manually** (no Blueprint) — same values as the table
+above, entered by hand when creating a new Web Service, environment
+`Python 3`. Either way, note the resulting URL
+(`https://<your-service-name>.onrender.com`) — you need it in step 2.
+
+A couple of things worth knowing before you deploy, not after:
+
+- **Storage is ephemeral on Render's free tier** — `final/data/*.sqlite`
+  and `final/models/*.pt` reset on every redeploy. The start command
+  above reseeds the synthetic demo dataset automatically (same idempotent
+  `import_csvs()` behavior the Docker entrypoint relies on — see
+  `scripts/seed_demo_data.py`), so the app always comes up working, it
+  just won't remember users/training across deploys. If you want that to
+  persist, attach a Render **Disk**, mount it, and point
+  `NEUROFEED_DB_PATH`/`NEUROFEED_AUTH_DB_PATH` at it — `MODEL_DIR` in
+  `ddqn_agent.py` isn't yet settings-driven, so DDQN checkpoints
+  specifically would still need that wired up as a follow-up.
+- **Webcam attention won't run here regardless of settings** — Render
+  has no camera device to open; `NEUROFEED_ENABLE_WEBCAM_ATTENTION=false`
+  (already the default) is the only setting that makes sense for a cloud
+  host. The app degrades to its normal "no face detected" fallback.
+- **Free tier + PyTorch/OpenCV/MediaPipe** is a real resource squeeze
+  (512MB RAM on Render's free instance type) — if the service crashes or
+  the build times out, the Starter tier's extra memory is the first thing
+  to try before debugging further.
+
+### 2. Frontend on Netlify
+
+**Via the dashboard** — Netlify → **Add new site** → **Import an existing
+project** → connect this repo. It reads `netlify.toml` and needs nothing
+filled in manually:
+
+| Field | Value |
+|---|---|
+| Base directory | *(leave default — set via netlify.toml)* |
+| Build command | *(none — static files, no build step)* |
+| Publish directory | `final/frontend` |
+
+Before or after the first deploy, make the two edits that depend on your
+Render URL from step 1:
+
+1. **`final/frontend/config.js`** — replace
+   `https://YOUR-RENDER-SERVICE.onrender.com` with your actual Render URL.
+2. **`netlify.toml`** — same replacement, inside the `connect-src` value
+   of the `Content-Security-Policy` header (without it, the CSP blocks
+   the frontend from calling the backend at all — this isn't optional).
+
+Commit both, push, Netlify redeploys automatically. Note the resulting
+Netlify URL (`https://<your-site-name>.netlify.app`) for step 3.
+
+### 3. Close the loop: CORS
+
+Back on Render, set the `NEUROFEED_CORS_ORIGINS` env var you left blank
+in step 1 to your Netlify URL (exact origin, no trailing slash, e.g.
+`https://your-site-name.netlify.app`), then redeploy the backend. Until
+this is set, the backend still works standalone (`curl`, `/docs`,
+Postman) — only browser requests *from the Netlify origin* are rejected
+by CORS in the meantime.
+
+### Sanity-checking the split deployment
+
+```bash
+curl https://<your-render-url>/health          # backend up, DB seeded
+curl -I https://<your-netlify-url>/            # frontend serving, check headers
+```
+
+Then open the Netlify URL, sign up (or continue as guest), and confirm a
+recommendation loads — that exercises frontend → backend → SQLite → NLP
+engine end to end. If `/recommend` fails in the browser console with a
+CORS or CSP error, it's almost always one of the two URL placeholders
+above still unreplaced.
+
 ## API overview
 
 | Group | Endpoints |
@@ -297,9 +394,12 @@ Full interactive docs at `/docs` once the server is running.
 │   ├── cache.py / ratelimit.py / metrics.py / logging_config.py
 │   ├── scripts/seed_demo_data.py  Synthetic dataset generator
 │   ├── frontend/                 Editorial-style feed UI (vanilla HTML/CSS/JS)
+│   │   └── config.js             Backend API base URL — the one line split deployment edits
 │   ├── tests/                    pytest suite
-│   ├── Dockerfile / docker-compose.yml
-│   └── .github/workflows/ci.yml (at repo root)
+│   └── Dockerfile / docker-compose.yml
+├── render.yaml                   Render Blueprint (backend)
+├── netlify.toml                  Netlify config (frontend)
+└── .github/workflows/ci.yml
 ```
 
 ## Known limitations

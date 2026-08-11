@@ -1,6 +1,9 @@
 // Login page handler — pulled out of login.html's inline <script> so the
 // backend can serve a script-src CSP without 'unsafe-inline'. Depends on
-// auth.js (isValidEmail / setButtonLoading) loaded first.
+// config.js (window.NEUROFEED_API_BASE) and auth.js (isValidEmail /
+// setButtonLoading) loaded first.
+
+const API_BASE = window.NEUROFEED_API_BASE || '';
 
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -38,7 +41,7 @@ async function handleLogin() {
     setButtonLoading(loginBtn, true);
 
     try {
-        const response = await fetch('/auth/login', {
+        const response = await fetch(`${API_BASE}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password }),
