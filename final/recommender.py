@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import random
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -59,11 +59,25 @@ class NewsRecommender:
     def __init__(self, db_path: Path = DB_PATH) -> None:
         self.db_path = db_path
         self.settings = get_settings()
-        self._agents: dict[str, DDQNAgent] = {}
+        # Schema migrations (including any ALTER TABLE ADD COLUMN — see
+        # database.py) must run *before* anything below reads the table,
+        # UserInterestGraph included: it loads eagerly in its own
+        # __init__, so constructing it before init_db() has run against
+        # an existing older-schema DB file means it queries a column that
+        # doesn't exist yet in *this* process's connection, not "queries a
+        # brand new table" — a real crash the first time a new column is
+        # added and the process starts against a pre-existing DB file.
+        init_db(db_path)
+        # LRU: OrderedDict, most-recently-used moved to the end, oldest
+        # evicted from the front once over settings.max_cached_agents —
+        # each DDQNAgent holds a PyTorch model + bandit state in memory,
+        # and without a bound this grows for every distinct user_id a
+        # long-running process ever serves (e.g. the evaluation harness
+        # alone mints a fresh synthetic user per run).
+        self._agents: "OrderedDict[str, DDQNAgent]" = OrderedDict()
         self._nlp = EnhancedNLPEngine(n_lsa=64)
         self._graph = UserInterestGraph(db_path)
         self._nlp_fitted = False
-        init_db(db_path)
         with db_connect(db_path) as conn:
             news_count = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
         if news_count == 0:
@@ -81,7 +95,11 @@ class NewsRecommender:
         agent = self._agents.get(user_id)
         if agent is None or agent.categories != cats:
             agent = DDQNAgent(cats, user_id=user_id, db_path=self.db_path)
-            self._agents[user_id] = agent
+        self._agents[user_id] = agent
+        self._agents.move_to_end(user_id)
+        while len(self._agents) > self.settings.max_cached_agents:
+            _evicted_id, evicted = self._agents.popitem(last=False)
+            evicted.save()  # checkpoint to disk before dropping from memory
         return agent
 
     # ──────────────────────────────────────────────────────
@@ -462,6 +480,18 @@ class NewsRecommender:
             liked_cats    = {c for c, (likes, total) in cat_like_ratio.items() if likes / total >= 0.6}
             disliked_cats = {c for c, (likes, total) in cat_like_ratio.items() if likes / total <= 0.3}
 
+            # Graph-informed exploration: categories the knowledge graph
+            # has learned co-occur with what the user already likes (e.g.
+            # liked "technology" and "science" together before) get a
+            # smaller boost than an outright liked category, steering
+            # exploration toward *related* new interests instead of
+            # picking the random/trending pool with no regard for what
+            # this specific user tends to like together.
+            co_interest_cats: set[str] = set()
+            for lc_cat in liked_cats:
+                co_interest_cats.update(self._graph.get_co_interest_categories(user_id, lc_cat, n=3))
+            co_interest_cats -= liked_cats
+
             interaction_count = conn.execute(
                 "SELECT COUNT(*) FROM interactions WHERE user_id = ?", (user_id,)
             ).fetchone()[0]
@@ -546,6 +576,9 @@ class NewsRecommender:
                     + small_randomness()
                     - saturation
                 )
+                co_interest = cat in co_interest_cats and cat not in lc and cat not in dc
+                if co_interest:
+                    final = clamp(final + 0.08)
                 if cat in lc:
                     final = clamp(final + 0.20)
                 if cat in dc:
@@ -560,6 +593,7 @@ class NewsRecommender:
                     "ts_reward":         round(ts_rwd,        4),
                     "recency_boost":     round(recency,       4),
                     "saturation_penalty": round(saturation,   4),
+                    "co_interest_boost": co_interest,
                     "hitl_decision": (
                         "auto_skip"    if final < 0.03 else
                         "ask_continue" if final < 0.50 else
@@ -614,6 +648,13 @@ class NewsRecommender:
                     final_mix.append(item)
             random.shuffle(final_mix)
 
+        # Strict cap: at most 2 per category. When the candidate pool isn't
+        # diverse enough to fill all k slots without breaking that cap,
+        # returning fewer than k is the right trade — a shorter but varied
+        # batch beats hitting the count target by stuffing it with
+        # near-duplicate same-category filler (tried relaxing the cap as a
+        # top-up here; it silently produced 5-of-8 in one category, worse
+        # than just returning 5 diverse items instead of 8 repetitive ones).
         cat_count: dict[str, int] = {}
         filtered: list[dict] = []
         for item in final_mix:
@@ -743,11 +784,15 @@ class NewsRecommender:
         interaction_score = compute_interaction_score(click_val, poll_val, time_spent, long_term_history)
         reward            = compute_reward(liked, time_spent, similarity, scroll_depth)
 
-        # ── update graph memory ───────────────────────────
-        self._graph.record_interaction(user_id, category, reward, bool(liked), time_spent)
-
-        # ── build state ───────────────────────────────────
-        graph_scores = {cat: self._graph.get_category_score(user_id, cat) for cat in self.categories()}
+        # ── build "before" state ───────────────────────────
+        # Snapshot graph scores *before* recording this interaction so
+        # `state` genuinely represents the world prior to the action being
+        # rewarded — read graph_scores after record_interaction() and the
+        # replay transition silently leaks this event's own outcome into
+        # what's supposed to be the pre-action state, which is exactly the
+        # kind of thing that quietly degrades what a DDQN can learn from
+        # the transition.
+        graph_scores_before = {cat: self._graph.get_category_score(user_id, cat) for cat in self.categories()}
         agent        = self._agent(user_id)
         ts_rewards   = dict(zip(agent.categories, agent.hybrid.ts.get_expected_reward()))
         recent_rows  = []
@@ -762,7 +807,7 @@ class NewsRecommender:
         state_overrides = {
             "attention_score":   attention_score,
             "interaction_score": interaction_score,
-            "graph_scores":      graph_scores,
+            "graph_scores":      graph_scores_before,
             "ts_rewards":        ts_rewards,
             "time_sin":          time_sin,
             "time_cos":          time_cos,
@@ -772,6 +817,10 @@ class NewsRecommender:
 
         categories = self.categories()
         q_value    = float(agent.q_values(state)[categories.index(category)]) if category in categories else 0.0
+
+        # ── update graph memory ───────────────────────────
+        # Only now, after `state` has been captured — see the note above.
+        self._graph.record_interaction(user_id, category, reward, bool(liked), time_spent)
 
         pref_delta = 0.14 + 0.08 * attention_score if liked else -0.18 - 0.10 * (1.0 - attention_score)
         if time_spent > 6:
@@ -901,18 +950,26 @@ class NewsRecommender:
             )
 
         # ── RL update ─────────────────────────────────────
-        # Recompute session_like_rate after the interaction has been inserted
-        # so next_state reflects the current feedback signal.
+        # next_state must reflect the world *after* this interaction was
+        # recorded — recompute session_like_rate, graph scores, and the
+        # category preference actually just written, instead of quietly
+        # reusing the pre-interaction snapshots as the old code did (which
+        # meant `next_state` == `state` in every dimension that should
+        # have moved, collapsing the TD target's signal for exactly the
+        # category/preference/graph combo this feedback event was about).
         with db_connect(self.db_path) as _rc:
             _recent = _rc.execute(
                 "SELECT liked FROM interactions WHERE user_id = ? ORDER BY rowid DESC LIMIT 20",
                 (user_id,),
             ).fetchall()
+        graph_scores_after = {cat: self._graph.get_category_score(user_id, cat) for cat in categories}
+        all_prefs_after = {**all_prefs, category: new_pref}
         _next_overrides = dict(state_overrides)
+        _next_overrides["graph_scores"] = graph_scores_after
         _next_overrides["session_like_rate"] = (
             sum(1 for r in _recent if r["liked"] == 1) / max(1, len(_recent))
         )
-        next_state = self.build_state_from_row(user_row, category, all_prefs, _next_overrides)
+        next_state = self.build_state_from_row(user_row, category, all_prefs_after, _next_overrides)
         loss = agent.observe(state, category, reward, next_state, done=False, liked=bool(liked))
 
         # ── persist graph ─────────────────────────────────
@@ -954,6 +1011,132 @@ class NewsRecommender:
             "step":     agent.step,
             "epsilon":  agent.epsilon,
             "loss":     loss,
+        }
+
+    # ──────────────────────────────────────────────────────
+    #  Reading history
+    # ──────────────────────────────────────────────────────
+    # `user_memory` (used elsewhere to exclude already-fed-back articles
+    # from future candidates) only keeps the last 100 news_ids/positions —
+    # it's an exclusion list, not a browsable history. `interactions` has
+    # everything (liked/skipped, dwell time, category, timestamp) and is
+    # the actual source of truth for "what has this user read."
+
+    def get_history(self, user_id: str, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        limit  = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        with db_connect(self.db_path) as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM interactions WHERE user_id = ?", (user_id,)
+            ).fetchone()[0]
+            rows = conn.execute(
+                """
+                SELECT i.news_id, i.category, i.liked, i.skipped, i.time_spent,
+                       i.attention_score, i.created_at,
+                       n.abstract, n.full_article, n.url
+                FROM interactions i
+                LEFT JOIN news n ON n.news_id = i.news_id
+                WHERE i.user_id = ?
+                ORDER BY i.rowid DESC
+                LIMIT ? OFFSET ?
+                """,
+                (user_id, limit, offset),
+            ).fetchall()
+
+        items = []
+        for r in rows:
+            headline = (r["full_article"] or r["abstract"] or r["news_id"] or "")
+            headline = headline.split(".")[0] if headline else r["news_id"]
+            items.append({
+                "news_id":         r["news_id"],
+                "category":        r["category"],
+                "headline":        headline,
+                "liked":           bool(r["liked"]),
+                "skipped":         bool(r["skipped"]),
+                "time_spent":      round(float(r["time_spent"] or 0), 2),
+                "attention_score": round(float(r["attention_score"] or 0), 3),
+                "url":             r["url"] or "",
+                "created_at":      r["created_at"],
+            })
+
+        return {
+            "user_id": user_id,
+            "total":   total,
+            "limit":   limit,
+            "offset":  offset,
+            "items":   items,
+        }
+
+    # ──────────────────────────────────────────────────────
+    #  Memory summary — human-readable digest of the knowledge graph
+    # ──────────────────────────────────────────────────────
+
+    def get_memory_summary(self, user_id: str, top_n: int = 5) -> dict[str, Any]:
+        """
+        Turn the raw graph-memory + interaction history into an
+        explainable digest: top interests, what's rising or fading right
+        now, and related categories the graph has learned to associate
+        with what they already like.
+
+        Deliberately *not* "recent like-ratio vs. current graph_score /
+        cat_pref" for rising/fading — both of those are themselves fast,
+        per-event-reactive EMAs (see graph_memory.py / the pref_delta
+        logic in feedback()), so they converge with recent behavior within
+        a handful of events and rarely diverge enough to be a meaningful
+        signal. Historical interaction *count* is the genuinely different
+        axis: it only grows, never reacts, so it's a clean proxy for "how
+        much investment has this category actually earned over time" to
+        contrast against what's happening in just the last 20 events.
+        """
+        categories = self.categories()
+        graph_stats = self._graph.get_graph_stats(user_id)
+        top_graph = [c["category"] for c in graph_stats["categories"][:top_n]]
+        historical_count = {c["category"]: int(c["count"]) for c in graph_stats["categories"]}
+
+        with db_connect(self.db_path) as conn:
+            recent_rows = conn.execute(
+                "SELECT category, liked FROM interactions WHERE user_id = ? "
+                "ORDER BY rowid DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+            first_last = conn.execute(
+                "SELECT MIN(created_at) AS first_seen, MAX(created_at) AS last_seen, COUNT(*) AS n "
+                "FROM interactions WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+        recent_rate: dict[str, list[int]] = {}
+        for r in recent_rows:
+            counts = recent_rate.setdefault(r["category"], [0, 0])
+            counts[1] += 1
+            counts[0] += int(r["liked"] == 1)
+
+        rising, fading = [], []
+        for cat in historical_count:
+            likes, total = recent_rate.get(cat, [0, 0])
+            recent_ratio = likes / total if total else 0.0
+            count = historical_count[cat]
+            if total >= 2 and recent_ratio >= 0.6 and count <= 5:
+                rising.append(cat)  # dominating recent activity despite little history
+            elif count > 5 and (total == 0 or recent_ratio < 0.3):
+                fading.append(cat)  # established, but quiet or unwelcome lately
+
+        related: dict[str, list[str]] = {}
+        for cat in top_graph:
+            neighbors = self._graph.get_co_interest_categories(user_id, cat, n=3)
+            if neighbors:
+                related[cat] = neighbors
+
+        return {
+            "user_id":            user_id,
+            "top_interests":      top_graph,
+            "rising_interests":   rising,
+            "fading_interests":   fading,
+            "related_categories": related,
+            "total_interactions": int(first_last["n"] or 0),
+            "first_seen":         first_last["first_seen"],
+            "last_seen":          first_last["last_seen"],
+            "known_categories":   categories,
         }
 
     # ──────────────────────────────────────────────────────

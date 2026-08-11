@@ -15,8 +15,8 @@ import json
 import logging
 import queue
 import random
-import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 STATE_DIM = 10          # see build_state_from_row in recommender.py
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 MODEL_DIR.mkdir(exist_ok=True)
+
+# Shared, bounded pool for background checkpoint saves — every DDQNAgent
+# used to spin up its own dedicated daemon thread that blocked forever on
+# an internal queue.get(), which meant one permanently-alive OS thread per
+# distinct user_id a running process ever served (recommender.py caches
+# one DDQNAgent per user for the process lifetime). A long-running server
+# — or just this project's own evaluation harness, which mints a fresh
+# synthetic user_id per run — would leak threads without bound. A shared
+# pool caps the thread count regardless of how many users are served.
+_SAVE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ddqn-save")
 
 
 # ──────────────────────────────────────────────────────────
@@ -139,10 +149,10 @@ class DDQNAgent:
         # Hybrid bandit policy (TS + UCB + Q-value blend)
         self.hybrid = HybridPolicy(self.action_dim)
 
-        # Async save thread
+        # Async save: coalescing queue (only the latest pending checkpoint
+        # is kept per agent) drained by the shared _SAVE_EXECUTOR pool —
+        # see the module-level note on why this isn't a dedicated thread.
         self._save_queue: queue.Queue = queue.Queue(maxsize=1)
-        self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
-        self._save_thread.start()
 
         self._load_or_init()
 
@@ -227,22 +237,23 @@ class DDQNAgent:
     def _enqueue_save(self, payload: dict) -> None:
         try:
             if self._save_queue.full():
-                self._save_queue.get_nowait()
+                self._save_queue.get_nowait()  # coalesce: drop the stale pending save
             self._save_queue.put_nowait(payload)
         except queue.Full:
-            pass
+            return
+        _SAVE_EXECUTOR.submit(self._drain_and_save)
 
-    def _save_worker(self) -> None:
-        while True:
-            p = self._save_queue.get()
-            if p is None:
-                break
-            try:
-                self._do_save(p)
-            except Exception:
-                pass
-            finally:
-                self._save_queue.task_done()
+    def _drain_and_save(self) -> None:
+        try:
+            payload = self._save_queue.get_nowait()
+        except queue.Empty:
+            return  # already drained by another submitted task — nothing to do
+        try:
+            self._do_save(payload)
+        except Exception:
+            logger.exception("DDQNAgent: checkpoint save failed for user %s", self.user_id)
+        finally:
+            self._save_queue.task_done()
 
     def save(self) -> None:
         self._enqueue_save({

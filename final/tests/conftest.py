@@ -11,11 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Point every module that reads config.get_settings() at an isolated,
-# throwaway SQLite file *before* anything imports config/database/main —
-# otherwise tests would run against (and mutate) the real dev database.
+# Point every module that reads config.get_settings() at isolated,
+# throwaway SQLite files *before* anything imports config/database/auth/main
+# — otherwise tests would run against (and mutate) the real dev databases.
+# Both DBs need this, not just the main one: auth.py used to hardcode its
+# own path with no override at all, so any test touching signup/login was
+# silently writing real accounts into the dev auth.sqlite.
 _TEST_DB_PATH = ROOT / "data" / f"test_{uuid.uuid4().hex[:8]}.sqlite"
+_TEST_AUTH_DB_PATH = ROOT / "data" / f"test_auth_{uuid.uuid4().hex[:8]}.sqlite"
 os.environ["NEUROFEED_DB_PATH"] = str(_TEST_DB_PATH)
+os.environ["NEUROFEED_AUTH_DB_PATH"] = str(_TEST_AUTH_DB_PATH)
 os.environ["NEUROFEED_ENV"] = "test"
 os.environ["NEUROFEED_ENABLE_WEBCAM_ATTENTION"] = "false"
 os.environ["NEUROFEED_RATE_LIMIT_REQUESTS"] = "10000"  # tests shouldn't trip rate limiting
@@ -48,10 +53,21 @@ def _seeded_test_db():
 
     yield
 
-    for path in (_TEST_DB_PATH, news_csv, users_csv):
+    # DDQNAgent checkpoint saves run on a shared background thread pool
+    # (see ddqn_agent.py::_SAVE_EXECUTOR) and are fire-and-forget from the
+    # caller's perspective — drain it before deleting the temp DB files
+    # below, or a save still in flight can lose its race against unlink()
+    # and log a spurious "no such table" from a thread with nothing left
+    # to report it to.
+    from ddqn_agent import _SAVE_EXECUTOR
+
+    _SAVE_EXECUTOR.shutdown(wait=True)
+
+    for path in (_TEST_DB_PATH, _TEST_AUTH_DB_PATH, news_csv, users_csv):
         path.unlink(missing_ok=True)
-    for suffix in ("-wal", "-shm"):
-        Path(str(_TEST_DB_PATH) + suffix).unlink(missing_ok=True)
+    for db in (_TEST_DB_PATH, _TEST_AUTH_DB_PATH):
+        for suffix in ("-wal", "-shm"):
+            Path(str(db) + suffix).unlink(missing_ok=True)
 
 
 @pytest.fixture

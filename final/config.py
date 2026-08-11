@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # ── Data ────────────────────────────────────────────────
     db_path: Path = ROOT / "data" / "news_recommender.sqlite"
+    auth_db_path: Path = ROOT / "data" / "auth.sqlite"
 
     # ── CORS ────────────────────────────────────────────────
     # Comma-separated origins in production; "*" is fine for local dev only.
@@ -48,6 +49,13 @@ class Settings(BaseSettings):
     # MMR (Maximal Marginal Relevance) diversity re-ranking trade-off.
     # 1.0 = pure relevance ranking, 0.0 = pure novelty/diversity.
     mmr_lambda: float = 0.75
+
+    # Max distinct users' DDQNAgent (PyTorch model + bandit state) kept
+    # resident in memory at once. Without a bound this grows for every
+    # distinct user_id a long-running process ever serves — least-recently
+    # used agents are checkpointed to disk and evicted past this cap, and
+    # transparently reloaded from disk the next time that user is active.
+    max_cached_agents: int = 500
 
     # ── Caching ─────────────────────────────────────────────
     cache_ttl_seconds: float = 30.0
