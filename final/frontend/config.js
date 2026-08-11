@@ -10,5 +10,5 @@
   const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname);
   window.NEUROFEED_API_BASE = isLocal
     ? "http://localhost:8000"
-    : "https://YOUR-RENDER-SERVICE.onrender.com"; // <-- replace after deploying the backend
+    : "https://news-recommender-5wk4.onrender.com";
 })();
