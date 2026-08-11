@@ -1,16 +1,26 @@
 /* ── Variables ─────────────────────────────────────────────── */
+/* Dark editorial theme — a broadsheet look, inverted: near-black page,
+   warm off-white "ink" text, the same masthead red as an accent. --paper
+   is the raised-surface color (cards, inputs, panels) one step lighter
+   than --bg, so layering still reads even without the light theme's
+   drop-shadow-heavy depth cues. */
 :root {
-  --bg:        #ffffff;
-  --paper:     #fafaf8;
-  --border:    #e3e1db;
-  --border2:   #d2cfc6;
+  --bg:        #0e0e0d;
+  --paper:     #1a1a18;
+  --border:    #2c2b27;
+  --border2:   #3d3b36;
 
-  --red:       #b8121a;
-  --red-dim:   #b8121a14;
+  --red:       #ff5a5a;
+  --red-dim:   #ff5a5a1f;
 
-  --ink:       #1a1a1a;
-  --ink2:      #4a4a46;
-  --muted:     #8a8880;
+  --ink:       #f1efe8;
+  --ink2:      #b7b4ac;
+  --muted:     #7d7a72;
+
+  /* Toasts are a floating dark chip regardless of theme (they used to
+     piggyback on --ink for that in the light theme, but --ink is now
+     itself light — this keeps toasts a fixed dark surface either way). */
+  --toast-bg:  #232320;
 
   --r-sm: 4px;
   --r-md: 8px;
@@ -120,7 +130,9 @@ label {
 
 input, select {
   width: 100%;
-  background: #fff;
+  /* One step darker than the surrounding .form's --paper — an inset
+     look (vs. a raised one) reads better for text inputs in dark UIs. */
+  background: var(--bg);
   border: 1px solid var(--border2);
   border-radius: var(--r-sm);
   padding: 10px 12px;
@@ -145,7 +157,7 @@ input::placeholder { color: var(--muted); }
   align-items: center;
   gap: 8px;
   padding: 8px 11px;
-  background: #fff;
+  background: var(--bg);
   border: 1px solid var(--border2);
   border-radius: var(--r-sm);
   font-size: 0.85rem;
@@ -164,13 +176,23 @@ input::placeholder { color: var(--muted); }
 input[type="range"] { flex: 1; accent-color: var(--red); padding: 0; height: 4px; }
 
 /* ── Buttons ───────────────────────────────────────────────── */
-button, .btn-primary { cursor: pointer; border: none; font: inherit; font-weight: 700; border-radius: var(--r-sm); transition: filter 120ms ease; }
+button, .btn-primary {
+  cursor: pointer;
+  border: none;
+  font: inherit;
+  font-weight: 700;
+  border-radius: var(--r-sm);
+  transition: filter 120ms ease, transform 120ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
 button:hover { filter: brightness(1.08); }
-button:active { filter: brightness(0.94); }
+button:active { filter: brightness(0.9); transform: scale(0.96); }
 
 .btn-primary {
   background: var(--red);
-  color: #fff;
+  /* --red is tuned bright for text-on-dark-bg legibility elsewhere in
+     this theme, which means white text on top of it as a *background*
+     falls short of WCAG AA (~3:1) — near-black reads much better here. */
+  color: #17140f;
   padding: 13px 22px;
   font-size: 0.92rem;
   font-weight: 700;
@@ -180,7 +202,7 @@ button:active { filter: brightness(0.94); }
 .btn-lg { padding: 14px 24px; font-size: 0.98rem; }
 
 .btn-ghost {
-  background: #fff;
+  background: var(--paper);
   border: 1px solid var(--border2);
   color: var(--ink2);
   padding: 7px 16px;
@@ -208,11 +230,11 @@ button:active { filter: brightness(0.94); }
   top: 100%;
   right: 0;
   margin-top: 8px;
-  background: #fff;
+  background: var(--paper);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   min-width: 140px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
   z-index: 100;
 }
 
@@ -287,13 +309,14 @@ button:active { filter: brightness(0.94); }
   font-family: var(--sans);
   border-radius: 100px;
   cursor: pointer;
-  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease,
+              transform 120ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .mood-chip:hover { border-color: var(--red); color: var(--red); }
 .mood-chip.active {
   background: var(--red);
   border-color: var(--red);
-  color: #fff;
+  color: #17140f;
 }
 
 .mood-tuned {
@@ -346,7 +369,7 @@ button:active { filter: brightness(0.94); }
   align-items: center;
   gap: 6px;
   background: var(--red);
-  color: #fff;
+  color: #17140f;
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.06em;
@@ -498,10 +521,11 @@ button:active { filter: brightness(0.94); }
   padding: 14px 0;
   border-top: 1px solid var(--border);
   cursor: pointer;
-  transition: background 120ms;
+  transition: background 120ms, transform 120ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .updates-list li:hover { background: var(--red-dim); }
+.updates-list li:active { transform: scale(0.985); }
 
 .updates-list li.active .update-headline { color: var(--red); }
 
@@ -525,16 +549,28 @@ button:active { filter: brightness(0.94); }
 
 /* ── Card transition (slide out old / slide in new) ─────────── */
 .hero-article {
-  transition: opacity 200ms ease, transform 200ms ease;
+  transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
+              transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .hero-article.card-slide-out {
   opacity: 0;
-  transform: translateX(-24px);
+  transform: translateX(-48px) scale(0.97);
 }
 .hero-article.card-slide-in {
   opacity: 0;
-  transform: translateX(24px);
+  transform: translateX(48px) scale(0.97);
   transition: none;
+}
+
+/* A brief red glow around the hero visual when a new card lands — a
+   clear "something just changed" cue, whether the change came from a
+   manual click or an automatic attention-driven skip. */
+.hero-visual.card-flash {
+  animation: hero-flash 650ms ease-out;
+}
+@keyframes hero-flash {
+  0%   { box-shadow: 0 0 0 3px var(--red), 0 0 28px 4px var(--red-dim); }
+  100% { box-shadow: 0 0 0 3px transparent, 0 0 28px 4px transparent; }
 }
 
 /* ── Trending Now ──────────────────────────────────────────── */
@@ -584,6 +620,7 @@ button:active { filter: brightness(0.94); }
   border-color: var(--red);
   transform: translateY(-2px);
 }
+.trending-card:active { transform: translateY(-2px) scale(0.97); }
 
 .trending-card-cat {
   font-size: 0.64rem;
@@ -646,6 +683,7 @@ button:active { filter: brightness(0.94); }
   transition: border-color 140ms, transform 140ms;
 }
 .live-news-card:hover { border-color: var(--red); transform: translateY(-2px); }
+.live-news-card:active { transform: translateY(-2px) scale(0.97); }
 
 .live-news-img {
   width: 100%;
@@ -717,13 +755,13 @@ button:active { filter: brightness(0.94); }
 }
 
 .toast {
-  background: var(--ink);
+  background: var(--toast-bg);
   color: #fff;
   padding: 12px 16px;
   border-radius: var(--r-sm);
   font-size: 0.85rem;
   font-weight: 600;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
   animation: toast-in 220ms ease;
   border-left: 3px solid var(--red);
 }
@@ -749,7 +787,7 @@ button:active { filter: brightness(0.94); }
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(20, 18, 16, 0.4);
+  background: rgba(0, 0, 0, 0.6);
   z-index: 900;
   animation: overlay-in 180ms ease;
 }
@@ -765,12 +803,12 @@ button:active { filter: brightness(0.94); }
   right: 0;
   bottom: 0;
   width: min(380px, 100vw);
-  background: #fff;
+  background: var(--paper);
   border-left: 1px solid var(--border);
   z-index: 901;
   display: flex;
   flex-direction: column;
-  box-shadow: -12px 0 40px rgba(0,0,0,0.12);
+  box-shadow: -12px 0 40px rgba(0,0,0,0.5);
   animation: panel-in 220ms ease;
 }
 

@@ -83,16 +83,35 @@ function endLoading() {
 
 // ─── Network helpers ──────────────────────────────────────────
 
-async function request(method, path, body) {
+async function request(method, path, body, timeoutMs = 60000) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem('token');
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(`${api}${path}`, {
-    method,
-    headers,
-    body: JSON.stringify(body),
-  });
+  // Render's free tier spins backends down when idle and can take
+  // 30-50s+ to wake back up on the next request — without a timeout, a
+  // hung request just sits there with zero feedback, indistinguishable
+  // from the button being broken. Bounded here so it fails with a clear
+  // message instead of hanging indefinitely.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(`${api}${path}`, {
+      method,
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error("The server is taking a while to respond (it may be waking up from idle) — please try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const text = await res.text();
@@ -465,7 +484,16 @@ function paintCardContent(item) {
 
   const [c1, c2] = heroPalette(category);
   const visual = $("heroVisual");
-  if (visual) { visual.style.setProperty("--hc1", c1); visual.style.setProperty("--hc2", c2); }
+  if (visual) {
+    visual.style.setProperty("--hc1", c1);
+    visual.style.setProperty("--hc2", c2);
+    // Re-trigger the flash on every card, not just the first — removing
+    // the class and forcing a reflow before re-adding it restarts a CSS
+    // animation that a plain re-add would otherwise no-op on.
+    visual.classList.remove("card-flash");
+    void visual.offsetWidth;
+    visual.classList.add("card-flash");
+  }
   $("heroWatermark").textContent = category;
 
   $("headline").textContent = item.full_article
@@ -621,8 +649,7 @@ async function sendFeedback(liked, skipped = 0, automatic = false, forceTrending
   if (!item) return;
 
   const timeSpent = (Date.now() - startedAt) / 1000;
-
-  await post("/feedback", {
+  const feedbackPayload = {
     user_id:          userId,
     news_id:          item.news_id,
     time_spent:       timeSpent,
@@ -643,8 +670,17 @@ async function sendFeedback(liked, skipped = 0, automatic = false, forceTrending
     similarity:       item.similarity,
     trending:         item.trending,
     poll_val:         currentPollVal,
-  });
+  };
 
+  // ── Respond instantly, sync in the background ──────────────
+  // This used to `await post("/feedback", ...)` with no try/catch before
+  // touching anything visible — on a slow or cold backend (Render's free
+  // tier can take real seconds, sometimes tens of seconds after an idle
+  // spin-down) every button press looked completely dead for however
+  // long that took, and a hard failure left it looking dead *forever*
+  // with no error shown. The card advancing is the user-facing action;
+  // persisting the feedback event is bookkeeping that can happen after,
+  // same as prefetchNextBatch() already does below.
   currentIndex += 1;
   hidePoll();
 
@@ -656,7 +692,12 @@ async function sendFeedback(liked, skipped = 0, automatic = false, forceTrending
     showToast("Got it — showing less of this.", "info", 1800);
   }
 
-  await Promise.all([fetchAttention(), loadUserInfo(userId)]);
+  post("/feedback", feedbackPayload).catch((e) => {
+    console.warn("Feedback sync failed:", e);
+    showToast("Couldn't save that action — it may not be reflected in your feed.", "error", 2500);
+  });
+  fetchAttention().catch(() => {});
+  loadUserInfo(userId).catch(() => {});
 
   // Kick off the next batch in the background once only a couple of
   // articles remain, so the eventual refresh below (or the next one)
@@ -731,6 +772,14 @@ $("onboardForm").addEventListener("submit", async (e) => {
   const orig = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
 
+  // The very first request against a cold Render backend can take 30-50s+
+  // — without this, "Opening…" sitting there that long looks identical to
+  // the button being broken. Only fires if it's actually still waiting.
+  const wakingUpTimer = setTimeout(() => {
+    if (btn) btn.textContent = "Waking up the server…";
+    showToast("First load can take up to a minute if the backend's been idle.", "info", 6000);
+  }, 4000);
+
   const interests = selectedInterests();
   const entered = String(form.get("user_id") || "").trim();
   userId = entered || `user_${Math.floor(Math.random() * 90000 + 10000)}`;
@@ -759,7 +808,11 @@ $("onboardForm").addEventListener("submit", async (e) => {
     // Kick off silent background signals: camera-driven attention + always-on polling.
     startAttentionCapture();
     startAttentionPolling();
+  } catch (err) {
+    console.error("Onboarding failed:", err);
+    showToast("Couldn't open your feed — check your connection and try again.", "error", 4000);
   } finally {
+    clearTimeout(wakingUpTimer);
     if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
 });
