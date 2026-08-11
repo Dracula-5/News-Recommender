@@ -75,6 +75,7 @@ actually make a production recommender hard:
 | **Graph-informed exploration** | `graph_memory.py`, `recommender.py` | Co-interest edges (which categories a user tends to like *together*, time-decayed like everything else in the graph) give a small score boost to related-but-not-yet-liked categories, steering exploration toward what the graph has learned this user tends to like — not just random/trending |
 | **Discounted bandits** | `rl_policies.py` | Thompson Sampling and UCB1 both discount old evidence (configurable decay, default 0.995) — plain bandit math assumes a stationary reward distribution, but a user's taste for a category drifts over weeks; without this, a few hundred interactions make the posterior nearly immovable |
 | **Reading history & memory summary** | `recommender.py` | `get_history()` — the full interactions log, paginated, not just the 100-entry seen-exclusion list. `get_memory_summary()` — a human-readable digest (top/rising/fading interests, related categories) of the same signal the scorer consumes as opaque numbers |
+| **Trending** | `recommender.py` | Site-wide (not personalized) top categories by `category_stats.trending_score` with a sample article each — the same trending signal the "trending" candidate pool already uses internally, surfaced directly for a always-something-to-read dashboard row |
 | HITL feedback loop | `recommender.py`, `webcam_attention.py` | Every like/dislike/poll/dwell-time/attention-score event updates SQLite, category preferences, the replay buffer, and DDQN weights immediately — state/next_state are built to cleanly bracket each transition (not leak the event's own outcome into the "before" state) |
 | Webcam attention | `webcam_attention.py` (OpenCV + MediaPipe FaceMesh) | Eye openness, gaze, head movement, brightness → a normalized attention score folded into the same reward signal as explicit feedback |
 
@@ -87,8 +88,9 @@ actually make a production recommender hard:
 | **Caching** | `cache.py` — documented in-memory TTL cache with a Redis-shaped interface (`get`/`set`/`get_or_set`), wired into the hot, cheap-to-stale read paths |
 | **Rate limiting** | `ratelimit.py` — fixed-window limiter, same "swap for Redis later" interface |
 | **Evaluation** | `evaluation.py` — see below |
-| **Authorization** | `authorize_user_id()` in `backend/main.py` — every per-user endpoint checks the bearer token's identity against the requested `user_id`; guest mode (no token) still works, a *mismatched* token gets 403. Constant-time password comparison (`hmac.compare_digest`), server-side logout (`POST /auth/logout` actually revokes the token, not just a client-side `localStorage.clear()`) |
-| **Testing** | `tests/` — pytest suite (69 tests) against isolated, auto-seeded temp SQLite DBs (main + auth, separately); never touches the dev databases |
+| **Authorization** | `authorize_user_id()` in `backend/main.py` — every per-user endpoint checks the bearer token's identity against the requested `user_id`; guest mode (no token) still works, a *mismatched* token gets 403. `require_authorized_user_id()` is the stricter variant for endpoints with no legitimate guest use case (account-info lookups) — no token at all is rejected there, not let through |
+| **Security hardening** | Constant-time password comparison (`hmac.compare_digest`); server-side logout (`POST /auth/logout` actually revokes the token); per-account login lockout after repeated failures (`login_throttle.py`, account-keyed, independent of the general per-IP limiter); a stricter rate limit on `/auth/signup` + `/auth/login` specifically; security response headers on every request (CSP with no `unsafe-inline`/`unsafe-eval` for scripts, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`) — see [Security notes](#security-notes) below |
+| **Testing** | `tests/` — pytest suite (80 tests) against isolated, auto-seeded temp SQLite DBs (main + auth, separately); never touches the dev databases |
 | **CI** | `.github/workflows/ci.yml` — seeds synthetic data, runs the full suite with coverage, builds the Docker image |
 | **Containerization** | `Dockerfile` + `docker-compose.yml` — `docker compose up --build` and it's running, no manual data-loading step |
 | **Reproducibility** | `scripts/seed_demo_data.py` — the original MIND-style dataset is proprietary/gitignored like any real production dataset would be, so this generates a small, topically-coherent synthetic stand-in (BM25/TF-IDF/LSA need real lexical signal to be worth demonstrating, so it's templated per-category, not random word soup) |
@@ -169,6 +171,58 @@ Reports Precision@K, NDCG@K, intra-list category diversity, catalog
 coverage, and an early-vs-late precision split as a (noisy, small-sample,
 honestly-reported) proxy for within-session learning.
 
+## Security notes
+
+- **CSP with no `unsafe-inline`/`unsafe-eval` for scripts.** login.html and
+  signup.html used to have their form-submit handlers as inline
+  `<script>` blocks — moved to `login.js`/`signup.js` specifically so
+  `script-src 'self'` could be strict. `style-src` does allow
+  `'unsafe-inline'` (a few inline style attributes/properties — menu
+  visibility, toast colors — and CSS-only injection can't execute script,
+  a materially smaller risk than script-src would be); that's a
+  deliberate trade-off, not an oversight.
+- **Authorization, not just authentication.** Every per-user endpoint
+  checks the bearer token's identity against the `user_id` in the
+  request, not just whether *some* token was presented — see the IDOR
+  entry in the bug list above for what this replaced.
+- **Login brute-force lockout** (`login_throttle.py`) is intentionally
+  account-keyed, not IP-keyed — closes the "guess slowly / rotate IPs"
+  gap a per-IP rate limiter alone can't, at the cost of being griefable
+  (fail a few logins for someone else's email, they're briefly locked
+  out). A short default lockout (60s) bounds that; a production
+  deployment fronted by something that can do CAPTCHA/2FA would do
+  better, but "brute-forceable" beats "griefable" as the default when
+  only one control is available.
+- **Not done, and worth naming rather than glossing over:** auth tokens
+  live in `localStorage`, which is readable by any script on the page —
+  fine against network attackers, not against XSS. Moving to an
+  `HttpOnly` cookie would close that, but changes the auth flow (CSRF
+  now needs handling, since cookies are sent automatically) enough that
+  it's a deliberate follow-up, not a small fix folded into this pass.
+
+## Data & UX
+
+- **`GET /trending`** — site-wide (not personalized) trending
+  categories, cached the same way `/categories` is since it doesn't vary
+  per user. Feeds the "Trending Now" row above the adaptive feed.
+- **Settings panel** — interests, mood, location, exploration
+  preference, and an attention-tracking on/off toggle, all editable
+  after onboarding via `PATCH /user/{id}/interests` (now also accepts
+  `location`) and the existing `/attention/start` \| `/attention/stop`.
+  The toggle doesn't change the "starts silently by default" decision
+  from the initial UI pass — it just gives the user a way to turn it
+  back off, which a "quiet by default" UI still owes them.
+- **Background prefetch** — once two articles are left in the current
+  batch, the next one starts fetching in the background
+  (`prefetchNextBatch()`), so the eventual refresh usually finds it
+  already there instead of blocking on the network.
+- **Sliding card transitions, toasts, a loading bar** — the feed
+  animates the previous article out and the next one in on every
+  advance (CSS transform/opacity, no JS animation library); like/dislike
+  and settings-saved get a brief toast instead of nothing; a thin
+  top-edge bar shows during the (now rarer, thanks to prefetch) times a
+  batch has to load for real.
+
 ## Quick start
 
 ### Docker (recommended — zero setup)
@@ -215,7 +269,7 @@ pytest -v
 | Attention | `GET /attention`, `POST /attention/start`, `POST /attention/stop`, `GET /attention/stream` |
 | RL / graph / NLP introspection | `GET /rl/metrics/{user_id}`, `GET /graph/stats/{user_id}`, `GET /graph/top/{user_id}`, `GET /graph/related/{user_id}/{category}`, `GET /nlp/status`, `POST /nlp/score` |
 | Evaluation | `GET /eval/run` |
-| Ops | `GET /health`, `GET /metrics`, `GET /categories`, `GET /users` |
+| Ops | `GET /health`, `GET /metrics`, `GET /categories`, `GET /users`, `GET /trending` |
 
 Every per-user endpoint above (core loop, history/memory, profile) is
 gated by `authorize_user_id()` — see [Authorization](#engineering-practices-the-senior-developer-half) above.
@@ -237,6 +291,7 @@ Full interactive docs at `/docs` once the server is running.
 │   ├── evaluation.py            Simulated-user offline evaluation harness
 │   ├── webcam_attention.py      OpenCV + MediaPipe attention pipeline
 │   ├── auth.py                  Token-based auth (PBKDF2-HMAC-SHA256)
+│   ├── login_throttle.py        Per-account login brute-force lockout
 │   ├── database.py              SQLite schema + CSV import
 │   ├── config.py                Centralized settings (pydantic-settings)
 │   ├── cache.py / ratelimit.py / metrics.py / logging_config.py
