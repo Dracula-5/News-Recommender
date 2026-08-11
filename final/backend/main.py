@@ -300,6 +300,7 @@ class RecommendPayload(BaseModel):
     mode: str | None = None
     location: str | None = None
     mood: str | None = None
+    category: str | None = None  # sidebar "browse this topic" filter
 
 
 class FeedbackPayload(BaseModel):
@@ -737,6 +738,7 @@ def recommend(payload: RecommendPayload, authorization: str | None = Header(None
         mode=payload.mode,
         location=payload.location,
         mood=payload.mood,
+        category=payload.category,
     )
 
 

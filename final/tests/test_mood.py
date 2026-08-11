@@ -186,14 +186,23 @@ def test_recommend_scores_shift_toward_mood_congruent_category(engine, unique_us
     engine.onboard_user({"user_id": unique_user_id, "interests": [], "exploration_preference": 0.3})
     monkeypatch.setattr(recommender_module, "small_randomness", lambda *a, **k: 0.0)
 
+    # ORDER BY news_id (not just LIMIT) so this is deterministic regardless
+    # of other tests' insert/delete churn on the shared `news` table (e.g.
+    # test_live_news.py) perturbing SQLite's unordered-scan row order —
+    # a plain `LIMIT 6` with no ORDER BY silently returned an all-science
+    # (or all-technology) set often enough to break the pigeonhole overlap
+    # guarantee this test relies on.
     with db_connect(db_path) as conn:
-        fixed_pool = [
-            dict(r) for r in conn.execute(
-                "SELECT news_id, category, subcategory, location, preferred_time,"
-                " age_group, article_length, abstract, full_article, url"
-                " FROM news WHERE category IN ('science', 'technology') LIMIT 6"
-            ).fetchall()
-        ]
+        fixed_pool = []
+        for cat in ("science", "technology"):
+            fixed_pool.extend(
+                dict(r) for r in conn.execute(
+                    "SELECT news_id, category, subcategory, location, preferred_time,"
+                    " age_group, article_length, abstract, full_article, url"
+                    " FROM news WHERE category = ? AND is_live = 0 ORDER BY news_id LIMIT 3",
+                    (cat,),
+                ).fetchall()
+            )
     for row in fixed_pool:
         row["source_mix"] = "personalized"
     assert any(r["category"] == "science" for r in fixed_pool)

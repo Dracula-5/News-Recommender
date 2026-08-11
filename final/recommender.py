@@ -279,6 +279,7 @@ class NewsRecommender:
         pool_size:  int = 25,
         location:   str | None = None,
         force_mode: str | None = None,   # "trending" → skip personalised pool
+        category:   str | None = None,   # sidebar "browse this topic" filter
     ) -> list[dict[str, Any]]:
         blocked_sql = ",".join("?" for _ in blocked) or "''"
         seen_sql    = ",".join("?" for _ in seen_news) or "''"
@@ -293,6 +294,9 @@ class NewsRecommender:
         if location:
             base_filter += " AND news.location = ?"
             base_params.append(location)
+        if category:
+            base_filter += " AND news.category = ?"
+            base_params.append(category)
 
         COLS = (
             "news.news_id, news.category, news.subcategory, news.location,"
@@ -359,6 +363,7 @@ class NewsRecommender:
         per_category: int = 4,
         blocked:    set[str] | None = None,
         exclude_ids: set[str] | None = None,
+        category:   str | None = None,   # sidebar "browse this topic" filter
     ) -> list[dict[str, Any]]:
         blocked     = blocked     or set()
         exclude_ids = exclude_ids or set()
@@ -368,6 +373,8 @@ class NewsRecommender:
         with db_connect(self.db_path) as conn:
             for cat in self.categories():
                 if cat in blocked:
+                    continue
+                if category and cat != category:
                     continue
                 exc_sql = ",".join("?" for _ in exclude) or "''"
                 for row in conn.execute(
@@ -429,10 +436,14 @@ class NewsRecommender:
         mode:     str | None = None,
         location: str | None = None,
         mood:     str | None = None,
+        category: str | None = None,   # sidebar "browse this topic" filter
     ) -> dict[str, Any]:
         k          = max(8, min(10, int(k)))
         categories = self.categories()
         agent      = self._agent(user_id)
+        # Silently ignore an unknown category rather than filtering the
+        # candidate pool down to nothing on a stale/bad value.
+        category   = category if category in categories else None
 
         # ── single DB round-trip ──────────────────────────
         with db_connect(self.db_path) as conn:
@@ -539,7 +550,7 @@ class NewsRecommender:
 
             candidates = self._fetch_candidates_conn(
                 conn, user_id, seen_news, blocked, pool_size=25,
-                location=location, force_mode=mode,
+                location=location, force_mode=mode, category=category,
             )
 
         # ── attention ─────────────────────────────────────
@@ -702,7 +713,9 @@ class NewsRecommender:
             final_mix.extend(leftovers[:remaining])
 
         if len(final_mix) < k:
-            fallback = self._category_balanced_rows(user_id, per_category=2, blocked=blocked, exclude_ids=seen_news)
+            fallback = self._category_balanced_rows(
+                user_id, per_category=2, blocked=blocked, exclude_ids=seen_news, category=category,
+            )
             extra = score_candidates([{**r, "source_mix": "balanced"} for r in fallback], liked_cats, disliked_cats)
             for item in extra:
                 if item["category"] not in disliked_cats:
@@ -716,11 +729,17 @@ class NewsRecommender:
         # near-duplicate same-category filler (tried relaxing the cap as a
         # top-up here; it silently produced 5-of-8 in one category, worse
         # than just returning 5 diverse items instead of 8 repetitive ones).
+        # None of that applies when the caller explicitly asked for one
+        # category (the sidebar's "browse this topic" filter) — the cap's
+        # whole point is spreading slots *across* categories, which is
+        # moot with only one in play, and would otherwise cut a single-
+        # category browse down to 2 results no matter what k was.
+        per_category_cap = k if category else 2
         cat_count: dict[str, int] = {}
         filtered: list[dict] = []
         for item in final_mix:
             cat = item["category"]
-            if cat_count.get(cat, 0) < 2:
+            if cat_count.get(cat, 0) < per_category_cap:
                 filtered.append(item)
                 cat_count[cat] = cat_count.get(cat, 0) + 1
 
@@ -749,6 +768,7 @@ class NewsRecommender:
             "interaction_count":    interaction_count,
             "mood":                 effective_mood or None,
             "mood_freshness":       round(mood_freshness, 4),
+            "category_filter":      category,
         }
 
     # ──────────────────────────────────────────────────────
