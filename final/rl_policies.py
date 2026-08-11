@@ -33,10 +33,20 @@ class ThompsonSamplingPolicy:
     * Expected reward: alpha / (alpha + beta)
 
     Provides 95% credible intervals for the dashboard UI.
+
+    Discounted (non-stationary): plain Thompson Sampling assumes a fixed
+    reward distribution per action, but a user's taste for a category
+    drifts over weeks/months. Without decay, alpha/beta accumulate forever
+    — after a few hundred interactions a single new one barely moves the
+    posterior at all, so the bandit stops being able to notice a user
+    going off a category they used to like. `decay` (<1) shrinks the whole
+    posterior a little on every update, so recent evidence keeps
+    proportionally more weight — standard "discounted Thompson Sampling."
     """
 
-    def __init__(self, n_actions: int) -> None:
+    def __init__(self, n_actions: int, decay: float = 0.995) -> None:
         self.n_actions = n_actions
+        self.decay = decay
         # Both start at 1 → uniform prior
         self.alpha = np.ones(n_actions, dtype=np.float64)
         self.beta  = np.ones(n_actions, dtype=np.float64)
@@ -50,6 +60,11 @@ class ThompsonSamplingPolicy:
         return int(np.argmax(samples))
 
     def update(self, action: int, liked: bool) -> None:
+        # Discount every arm's posterior a little each round, floored at
+        # the uniform prior (1, 1) so the Beta distribution never
+        # degenerates as it decays.
+        self.alpha = np.maximum(self.alpha * self.decay, 1.0)
+        self.beta  = np.maximum(self.beta  * self.decay, 1.0)
         if liked:
             self.alpha[action] += 1.0
         else:
@@ -125,11 +140,21 @@ class UCBPolicy:
     UCB1: selects  argmax[ value + c * sqrt(ln(t) / (count + ε)) ]
 
     c = sqrt(2) is the theoretically optimal constant for bounded [0,1] rewards.
+
+    Discounted, same reasoning as ThompsonSamplingPolicy above: `counts`
+    decays a little on every update, so (a) the running-average `values`
+    update keeps weighting recent rewards more heavily instead of an
+    ever-growing raw count diluting new evidence toward nothing, and (b)
+    the explore bonus naturally grows for an action that hasn't been
+    picked in a while even without decaying `values` directly, since the
+    global round counter `t` keeps climbing while that action's decayed
+    `count` shrinks.
     """
 
-    def __init__(self, n_actions: int, c: float = 1.41) -> None:
+    def __init__(self, n_actions: int, c: float = 1.41, decay: float = 0.995) -> None:
         self.n_actions = n_actions
         self.c = c
+        self.decay = decay
         self.counts = np.zeros(n_actions, dtype=np.float64)
         self.values = np.zeros(n_actions, dtype=np.float64)
         self.t = 0
@@ -150,9 +175,12 @@ class UCBPolicy:
         return int(np.argmax(scores))
 
     def update(self, action: int, reward: float) -> None:
+        self.counts *= self.decay
         self.counts[action] += 1
         n = self.counts[action]
-        # Incremental running average
+        # Incremental running average over the *decayed* count, so a
+        # streak of recent rewards moves this faster than it would if `n`
+        # were the raw, ever-growing number of times this action was picked.
         self.values[action] += (reward - self.values[action]) / n
 
     def get_state(self) -> Dict:

@@ -176,6 +176,19 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 PRIMARY KEY (user_id, category)
             );
 
+            -- Knowledge-graph: co-interest edges between category pairs a
+            -- user has liked (time-decayed independently of the nodes
+            -- above — an association fades if it isn't reinforced, same
+            -- as interest in a single category does).
+            CREATE TABLE IF NOT EXISTS graph_co_interest_edges (
+                user_id     TEXT NOT NULL,
+                category_a  TEXT NOT NULL,
+                category_b  TEXT NOT NULL,
+                weight      REAL DEFAULT 0,
+                last_time   REAL DEFAULT 0,
+                PRIMARY KEY (user_id, category_a, category_b)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_news_category ON news(category);
             CREATE INDEX IF NOT EXISTS idx_news_location ON news(location);
             CREATE INDEX IF NOT EXISTS idx_interactions_user ON interactions(user_id, created_at);
@@ -184,6 +197,7 @@ def init_db(db_path: Path = DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_cat_prefs_user_cat ON user_category_prefs(user_id, category);
             CREATE INDEX IF NOT EXISTS idx_cat_stats_category ON category_stats(category);
             CREATE INDEX IF NOT EXISTS idx_graph_edges_user ON graph_edges(user_id);
+            CREATE INDEX IF NOT EXISTS idx_co_interest_user ON graph_co_interest_edges(user_id);
             """
         )
         existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(interactions)").fetchall()}
@@ -201,6 +215,20 @@ def init_db(db_path: Path = DB_PATH) -> None:
         for col, definition in extra_cols.items():
             if col not in existing_cols:
                 conn.execute(f"ALTER TABLE interactions ADD COLUMN {col} {definition}")
+
+        existing_graph_cols = {row["name"] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
+        if "avg_reward" not in existing_graph_cols:
+            # Fixed-weight EMA of reward, tracked alongside the decayed
+            # *sum* in total_reward. Node scoring is driven by this, not
+            # total_reward/count — dividing a decayed sum by an
+            # ever-growing raw count made a user's score sink toward zero
+            # over a long history even with steady, undiminished
+            # engagement (the numerator decays, the denominator never
+            # does). An EMA with a fixed per-interaction weight doesn't
+            # have that problem, and time-decay-toward-neutral is applied
+            # separately at read time based on elapsed time since the last
+            # interaction (see graph_memory.py::_node_score_locked).
+            conn.execute("ALTER TABLE graph_edges ADD COLUMN avg_reward REAL DEFAULT 0")
 
 
 def normalize_user_columns(df: pd.DataFrame) -> pd.DataFrame:
