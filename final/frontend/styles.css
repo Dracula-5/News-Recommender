@@ -329,8 +329,22 @@ button:active { filter: brightness(0.9); transform: scale(0.96); }
 .hero-article {
   display: flex;
   flex-direction: column;
-  gap: 14px;
   animation: card-in 260ms ease;
+  /* One unified card: image, headline and content all inside a single
+     bordered surface, instead of the visual floating separately above
+     loose text. overflow:hidden clips hero-visual's square top corners
+     into this card's rounded ones. */
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.hero-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
 }
 
 @keyframes card-in {
@@ -340,7 +354,8 @@ button:active { filter: brightness(0.9); transform: scale(0.96); }
 
 .hero-visual {
   position: relative;
-  border-radius: var(--r-md);
+  /* No border-radius of its own — it's flush against the top of
+     .hero-article, which clips it via overflow:hidden instead. */
   min-height: 220px;
   display: flex;
   align-items: flex-start;

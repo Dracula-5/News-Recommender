@@ -121,40 +121,42 @@
           <div class="trending-row" id="trendingRow"></div>
         </section>
 
-        <!-- HERO ARTICLE -->
+        <!-- HERO ARTICLE — image, headline and content unified in one card -->
         <article class="hero-article" id="card">
           <div class="hero-visual" id="heroVisual">
             <span class="live-badge"><span class="live-dot"></span>LIVE</span>
             <span class="hero-cat-watermark" id="heroWatermark">News</span>
           </div>
 
-          <span id="category" class="chip-category">Category</span>
-          <h1 id="headline">Ready when you are.</h1>
+          <div class="hero-body">
+            <span id="category" class="chip-category">Category</span>
+            <h1 id="headline">Ready when you are.</h1>
 
-          <div class="byline-row">
-            <span class="byline">NEUROFEED DESK</span>
-            <span class="byline-sep">·</span>
-            <span id="readTimer" class="byline-timer">just now</span>
-          </div>
-
-          <p id="abstract">Open your feed to get your first recommendation.</p>
-          <a id="url" href="#" target="_blank" rel="noreferrer" class="read-link hidden">Read full article ↗</a>
-
-          <!-- Inline poll — appears after a while if attention drops -->
-          <div id="pollPrompt" class="poll hidden">
-            <p>Still with <strong>&ldquo;<span id="pollArticleName">this article</span>&rdquo;</strong>?</p>
-            <div class="poll-btns">
-              <button id="pollYes" class="btn-ghost">Yes</button>
-              <button id="pollNo" class="btn-ghost">No</button>
+            <div class="byline-row">
+              <span class="byline">NEUROFEED DESK</span>
+              <span class="byline-sep">·</span>
+              <span id="readTimer" class="byline-timer">just now</span>
             </div>
-          </div>
 
-          <div class="actions-row">
-            <button id="skipBtn" class="action-link" title="Shortcut: D">Not interested <kbd>D</kbd></button>
-            <span class="action-sep">·</span>
-            <button id="likeBtn" class="action-link action-like" title="Shortcut: L">Useful <kbd>L</kbd></button>
-            <span class="action-sep">·</span>
-            <button id="nextBtn" class="action-link" title="Shortcut: N">Next article → <kbd>N</kbd></button>
+            <p id="abstract">Open your feed to get your first recommendation.</p>
+            <a id="url" href="#" target="_blank" rel="noreferrer" class="read-link hidden">Read full article ↗</a>
+
+            <!-- Inline poll — appears after a while if attention drops -->
+            <div id="pollPrompt" class="poll hidden">
+              <p>Still with <strong>&ldquo;<span id="pollArticleName">this article</span>&rdquo;</strong>?</p>
+              <div class="poll-btns">
+                <button id="pollYes" class="btn-ghost">Yes</button>
+                <button id="pollNo" class="btn-ghost">No</button>
+              </div>
+            </div>
+
+            <div class="actions-row">
+              <button id="skipBtn" class="action-link" title="Shortcut: D">Not interested <kbd>D</kbd></button>
+              <span class="action-sep">·</span>
+              <button id="likeBtn" class="action-link action-like" title="Shortcut: L">Useful <kbd>L</kbd></button>
+              <span class="action-sep">·</span>
+              <button id="nextBtn" class="action-link" title="Shortcut: N">Next article → <kbd>N</kbd></button>
+            </div>
           </div>
         </article>
 
