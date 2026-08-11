@@ -88,12 +88,21 @@
                 <span id="userEmail">User</span>
               </button>
               <div class="menu-dropdown" id="menuDropdown" style="display: none;">
+                <a href="#" id="settingsLink" class="menu-item">Settings</a>
                 <a href="#" id="logoutLink" class="menu-item">Logout</a>
               </div>
             </div>
           </div>
           <div class="masthead-rule"></div>
         </header>
+
+        <!-- TRENDING NOW -->
+        <section class="trending-section hidden" id="trendingSection">
+          <div class="trending-head">
+            <h2>Trending Now</h2>
+          </div>
+          <div class="trending-row" id="trendingRow"></div>
+        </section>
 
         <!-- HERO ARTICLE -->
         <article class="hero-article" id="card">
@@ -142,6 +151,55 @@
         </section>
 
       </section>
+
+      <!-- Thin top-edge progress bar while a new batch of recommendations loads -->
+      <div class="loading-bar" id="loadingBar"></div>
+
+      <!-- Toasts (like/dislike confirmation, settings saved, errors) -->
+      <div class="toast-stack" id="toastStack"></div>
+
+      <!-- SETTINGS DRAWER -->
+      <div class="settings-overlay hidden" id="settingsOverlay"></div>
+      <aside class="settings-panel hidden" id="settingsPanel">
+        <div class="settings-head">
+          <h3>Settings</h3>
+          <button class="settings-close" id="settingsClose" type="button" aria-label="Close settings">&times;</button>
+        </div>
+        <div class="settings-body">
+          <div class="form-section-label">Interests</div>
+          <div id="settingsInterestOptions" class="checkbox-grid"></div>
+
+          <div class="form-section-label">Context</div>
+          <label>
+            Mood
+            <input id="settingsMood" type="text" placeholder="curious, focused…" />
+          </label>
+          <label>
+            Location
+            <input id="settingsLocation" type="text" placeholder="India" />
+          </label>
+
+          <div class="form-section-label">Tuning</div>
+          <label>
+            Exploration preference
+            <div class="slider-row">
+              <span class="slider-lo">Focused</span>
+              <input id="settingsExploration" type="range" min="0" max="1" step="0.05" value="0.25" />
+              <span class="slider-hi">Exploratory</span>
+            </div>
+          </label>
+
+          <div class="form-section-label">Privacy</div>
+          <label class="toggle-row">
+            <span>Attention tracking (camera)</span>
+            <input id="settingsAttentionToggle" type="checkbox" class="toggle-input" />
+          </label>
+          <p class="settings-hint">Uses your webcam locally to gauge reading attention — nothing is recorded or uploaded, only a live score feeds your recommendations.</p>
+
+          <button id="settingsSave" class="btn-primary btn-lg" type="button">Save settings</button>
+        </div>
+      </aside>
+
     </main>
 
     <script src="app.js"></script>

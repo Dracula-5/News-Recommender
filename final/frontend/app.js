@@ -36,20 +36,57 @@ let pollTimer = null;
 let scrollDepth = 0;
 let userMood = "";
 let userLocation = "";
+let userInterestText = "";        // used to pre-check the settings panel's interest boxes
+let userExplorationSignal = 0.25; // used to pre-fill the settings panel's slider
 let currentPollVal = 0.5;         // updated when user answers poll
 let currentLongTermHistory = 0.2; // updated from user profile on each load
 
 const $ = (id) => document.getElementById(id);
 
+// ─── Toasts ─────────────────────────────────────────────────
+
+function showToast(message, kind = "info", duration = 3200) {
+  const stack = $("toastStack");
+  if (!stack) return;
+  const el = document.createElement("div");
+  el.className = `toast toast-${kind}`;
+  el.textContent = message;
+  stack.appendChild(el);
+  setTimeout(() => {
+    el.classList.add("toast-out");
+    setTimeout(() => el.remove(), 200);
+  }, duration);
+}
+
+// ─── Loading bar ────────────────────────────────────────────
+
+let loadingDepth = 0;
+
+function beginLoading() {
+  loadingDepth += 1;
+  const bar = $("loadingBar");
+  if (bar) { bar.classList.remove("done"); bar.classList.add("active"); }
+}
+
+function endLoading() {
+  loadingDepth = Math.max(0, loadingDepth - 1);
+  if (loadingDepth > 0) return;
+  const bar = $("loadingBar");
+  if (!bar) return;
+  bar.classList.remove("active");
+  bar.classList.add("done");
+  setTimeout(() => bar.classList.remove("done"), 250);
+}
+
 // ─── Network helpers ──────────────────────────────────────────
 
-async function post(path, body) {
+async function request(method, path, body) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem('token');
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${api}${path}`, {
-    method: "POST",
+    method,
     headers,
     body: JSON.stringify(body),
   });
@@ -62,6 +99,22 @@ async function post(path, body) {
     }
     throw new Error(text);
   }
+  return res.json();
+}
+
+const post = (path, body) => request("POST", path, body);
+const patch = (path, body) => request("PATCH", path, body);
+
+// GET with the bearer token attached, same as post() does for writes —
+// a couple of reads used to skip this (harmless for guests, since the
+// backend lets a tokenless request through, but inconsistent for a
+// logged-in user who has a token to send).
+async function authGet(path) {
+  const headers = {};
+  const token = localStorage.getItem('token');
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${api}${path}`, { headers });
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -101,30 +154,97 @@ async function loadUserIds() {
 }
 
 // Loads the user's profile (mood / location / interaction history) so the
-// recommender and live scoring keep adapting — none of this is rendered.
+// recommender and live scoring keep adapting — mostly not rendered, except
+// where the settings panel reuses it to pre-fill its fields.
 async function loadUserInfo(uid) {
-  if (!uid) return;
+  if (!uid) return null;
   try {
-    const res = await fetch(`${api}/user/${encodeURIComponent(uid)}`);
-    if (!res.ok) return;
-    const u = await res.json();
+    const u = await authGet(`/user/${encodeURIComponent(uid)}`);
     userMood = u.mood || userMood;
     userLocation = u.current_location || u.location || userLocation;
+    userInterestText = u.user_interest_text || userInterestText;
+    userExplorationSignal = Number(u.exploration_signal ?? userExplorationSignal);
     currentLongTermHistory = Number(u.interaction_score || 0.2);
-  } catch (e) { console.warn("loadUserInfo:", e); }
+    return u;
+  } catch (e) { console.warn("loadUserInfo:", e); return null; }
 }
 
 function selectedInterests() {
   return Array.from(document.querySelectorAll("#interestOptions input:checked")).map(i => i.value);
 }
 
+// ─── Trending Now ───────────────────────────────────────────────
+// Site-wide, not personalized — a separate signal from the adaptive feed
+// below it, surfaced so there's always something to look at even before
+// the recommender has any read on this particular user.
+
+async function loadTrending() {
+  const section = $("trendingSection");
+  const row = $("trendingRow");
+  if (!row) return;
+  try {
+    const res = await fetch(`${api}/trending?limit_categories=6&articles_per_category=1`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const sections = data.trending || [];
+    if (!sections.length) { section?.classList.add("hidden"); return; }
+
+    row.innerHTML = "";
+    sections.forEach(({ category, articles }) => {
+      const article = articles[0];
+      if (!article) return;
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "trending-card";
+      const catEl = document.createElement("span");
+      catEl.className = "trending-card-cat";
+      catEl.textContent = category;
+      const headEl = document.createElement("span");
+      headEl.className = "trending-card-headline";
+      headEl.textContent = article.headline;
+      card.append(catEl, headEl);
+      card.addEventListener("click", () => openTrendingArticle(article));
+      row.appendChild(card);
+    });
+    section?.classList.remove("hidden");
+  } catch (e) { console.warn("loadTrending:", e); }
+}
+
+// Jumps straight to a trending article by splicing it into the queue right
+// after the current position, rather than requiring a full /recommend
+// round-trip — it's not personalized, but reading it still goes through
+// the normal feedback loop like anything else in the feed.
+function openTrendingArticle(article) {
+  const alreadyQueued = queue.findIndex((q) => q.news_id === article.news_id);
+  if (alreadyQueued !== -1) {
+    currentIndex = alreadyQueued;
+  } else {
+    const insertAt = currentIndex + 1;
+    queue.splice(insertAt, 0, { ...article, source_mix: "trending_dashboard", score: 0, similarity: 0, trending: 1 });
+    currentIndex = insertAt;
+  }
+  paintCard();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 // ─── Attention (silent) ─────────────────────────────────────────
 // The webcam is started automatically in the background the moment the feed
 // opens — no button, no preview, no on-screen metrics. The resulting
 // attention score still drives dwell-time pacing, auto-skip and feedback.
+// The settings panel exposes a toggle to pause/resume it after the fact.
+
+let attentionCaptureActive = false;
 
 async function startAttentionCapture() {
-  try { await post("/attention/start", {}); } catch (e) { /* no camera available — fall back silently */ }
+  try {
+    await post("/attention/start", {});
+    attentionCaptureActive = true;
+  } catch (e) { attentionCaptureActive = false; /* no camera available — fall back silently */ }
+}
+
+async function stopAttentionCapture() {
+  try { await post("/attention/stop", {}); } catch (e) { /* already stopped, or no camera to begin with */ }
+  attentionCaptureActive = false;
 }
 
 async function fetchAttention() {
@@ -177,15 +297,40 @@ function resetTimer() {
   currentPollVal = 0.5;
 }
 
+// Slides the previous card out, then paints the new one and slides it in.
+// Skipped on the very first paint (nothing on screen yet to slide away).
 function paintCard() {
   const item = currentItem();
   if (!item) return;
+  const card = $("card");
+
+  if (card && card.dataset.painted === "1") {
+    card.classList.add("card-slide-out");
+    setTimeout(() => {
+      card.classList.remove("card-slide-out");
+      paintCardContent(item);
+      slideCardIn(card);
+    }, 180);
+  } else {
+    paintCardContent(item);
+    if (card) card.dataset.painted = "1";
+  }
+}
+
+function slideCardIn(card) {
+  card.classList.add("card-slide-in");
+  // Two rAFs: let the browser paint the offset starting position (with
+  // transition disabled by the .card-slide-in rule) before removing the
+  // class, or the transition-back-to-normal has nothing to animate from.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => card.classList.remove("card-slide-in"));
+  });
+}
+
+function paintCardContent(item) {
   hidePoll();
   resetScrollTracking();
   scheduleInterestPoll();
-
-  const card = $("card");
-  if (card) { card.style.animation = "none"; void card.offsetWidth; card.style.animation = ""; }
 
   const category = item.category || "news";
   $("category").textContent = category;
@@ -287,15 +432,49 @@ function suppressCategory(category) {
   queue = [...before, ...newWindow5, ...afterWindow, ...extras];
 }
 
+// A background-fetched batch, ready before the user actually runs out of
+// articles — refreshRecommendations() reaches for this first so the "next
+// batch" transition has no network gap most of the time. Only covers the
+// plain (mode=null) refresh path; a forced/trending refresh always fetches
+// fresh, which is fine — it's the uncommon path.
+let prefetchedBatch = null;
+let prefetchInFlight = false;
+
+async function prefetchNextBatch() {
+  if (prefetchInFlight || prefetchedBatch) return;
+  prefetchInFlight = true;
+  try {
+    const data = await post("/recommend", {
+      user_id: userId, k: 8, mode: null, location: userLocation, mood: userMood,
+    });
+    prefetchedBatch = data.recommendations || [];
+  } catch (e) {
+    // Silent — refreshRecommendations() will just fetch fresh when needed.
+  } finally {
+    prefetchInFlight = false;
+  }
+}
+
 async function refreshRecommendations(mode = null) {
-  const data = await post("/recommend", {
-    user_id: userId,
-    k: 8,
-    mode,
-    location: userLocation,
-    mood: userMood,
-  });
-  queue = data.recommendations || [];
+  let recommendations;
+  if (!mode && prefetchedBatch) {
+    recommendations = prefetchedBatch;
+    prefetchedBatch = null;
+  } else {
+    beginLoading();
+    try {
+      const data = await post("/recommend", {
+        user_id: userId, k: 8, mode, location: userLocation, mood: userMood,
+      });
+      recommendations = data.recommendations || [];
+    } catch (e) {
+      showToast("Couldn't load new recommendations — retrying next action.", "error");
+      throw e;
+    } finally {
+      endLoading();
+    }
+  }
+  queue = recommendations;
   currentIndex = 0;
   paintCard();
   await Promise.all([loadUserInfo(userId), loadUserIds()]);
@@ -337,11 +516,20 @@ async function sendFeedback(liked, skipped = 0, automatic = false, forceTrending
 
   if (liked === 1) {
     reorderQueueAfterLike(item.category);
+    if (!automatic) showToast("Noted — more like this coming up.", "success", 1800);
   } else if (!automatic) {
     suppressCategory(item.category);
+    showToast("Got it — showing less of this.", "info", 1800);
   }
 
   await Promise.all([fetchAttention(), loadUserInfo(userId)]);
+
+  // Kick off the next batch in the background once only a couple of
+  // articles remain, so the eventual refresh below (or the next one)
+  // usually finds it already there instead of waiting on the network.
+  if (!forceTrending && queue.length - currentIndex <= 2) {
+    prefetchNextBatch();
+  }
 
   if (currentIndex >= queue.length || forceTrending || currentIndex % 3 === 0) {
     await refreshRecommendations(forceTrending ? "trending" : null);
@@ -430,6 +618,7 @@ $("onboardForm").addEventListener("submit", async (e) => {
 
     await loadUserInfo(userId);
     await refreshRecommendations();
+    loadTrending();
 
     // Kick off silent background signals: camera-driven attention + always-on polling.
     startAttentionCapture();
@@ -491,6 +680,98 @@ if (logoutLink) {
     window.location.href = "login.html";
   });
 }
+
+// ─── Settings panel ─────────────────────────────────────────
+
+async function openSettings() {
+  const overlay = $("settingsOverlay");
+  const panel = $("settingsPanel");
+  if (!overlay || !panel) return;
+
+  try {
+    const res = await fetch(`${api}/categories`);
+    const data = await res.json();
+    const container = $("settingsInterestOptions");
+    if (container) {
+      container.innerHTML = "";
+      const currentWords = userInterestText.toLowerCase().split(/\s+/);
+      (data.categories || []).forEach((cat) => {
+        const label = document.createElement("label");
+        label.className = "checkbox-item";
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.name = "settings-interest"; cb.value = cat;
+        cb.checked = currentWords.includes(cat.toLowerCase());
+        label.append(cb, document.createTextNode(cat));
+        container.appendChild(label);
+      });
+    }
+  } catch (e) { console.warn("openSettings categories:", e); }
+
+  const moodEl = $("settingsMood"); if (moodEl) moodEl.value = userMood || "";
+  const locEl = $("settingsLocation"); if (locEl) locEl.value = userLocation || "";
+  const expEl = $("settingsExploration"); if (expEl) expEl.value = String(userExplorationSignal);
+  const toggle = $("settingsAttentionToggle"); if (toggle) toggle.checked = attentionCaptureActive;
+
+  overlay.classList.remove("hidden");
+  panel.classList.remove("hidden");
+}
+
+function closeSettings() {
+  $("settingsOverlay")?.classList.add("hidden");
+  $("settingsPanel")?.classList.add("hidden");
+}
+
+async function saveSettings() {
+  const interests = Array.from(
+    document.querySelectorAll("#settingsInterestOptions input:checked")
+  ).map((i) => i.value);
+  const mood = $("settingsMood")?.value.trim() || "";
+  const location = $("settingsLocation")?.value.trim() || "";
+  const exploration = Number($("settingsExploration")?.value ?? userExplorationSignal);
+  const wantsAttention = !!$("settingsAttentionToggle")?.checked;
+
+  const btn = $("settingsSave");
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+
+  try {
+    await patch(`/user/${encodeURIComponent(userId)}/interests`, {
+      interests,
+      mood,
+      location,
+      exploration_preference: exploration,
+    });
+
+    if (wantsAttention && !attentionCaptureActive) {
+      await startAttentionCapture();
+    } else if (!wantsAttention && attentionCaptureActive) {
+      await stopAttentionCapture();
+    }
+
+    await loadUserInfo(userId);
+    closeSettings();
+    showToast("Settings saved.", "success");
+  } catch (e) {
+    console.warn("saveSettings:", e);
+    showToast("Couldn't save settings — please try again.", "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
+const settingsLink = $("settingsLink");
+if (settingsLink) {
+  settingsLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menuDropdown) menuDropdown.style.display = "none";
+    openSettings();
+  });
+}
+
+$("settingsClose")?.addEventListener("click", closeSettings);
+$("settingsOverlay")?.addEventListener("click", closeSettings);
+$("settingsSave")?.addEventListener("click", saveSettings);
 
 // ─── Init ─────────────────────────────────────────────────────
 
