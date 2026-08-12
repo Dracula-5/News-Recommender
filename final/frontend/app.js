@@ -566,7 +566,10 @@ function resetTimer() {
 // Skipped on the very first paint (nothing on screen yet to slide away).
 function paintCard() {
   const item = currentItem();
-  if (!item) return;
+  if (!item) {
+    paintEmptyState();
+    return;
+  }
   const card = $("card");
 
   if (card && card.dataset.painted === "1") {
@@ -580,6 +583,23 @@ function paintCard() {
     paintCardContent(item);
     if (card) card.dataset.painted = "1";
   }
+}
+
+// Last-resort fallback if even the trending retry in refreshRecommendations()
+// comes back empty (nothing left unseen in the whole catalog) -- a clear,
+// honest message instead of a silently frozen screen where nothing the
+// user clicks or presses does anything.
+function paintEmptyState() {
+  hidePoll();
+  $("category").textContent = "";
+  $("headline").textContent = "You're all caught up";
+  $("abstract").textContent = "No more articles to show right now — try a different topic from the sidebar, change your mood, or check back later.";
+  const urlEl = $("url");
+  if (urlEl) urlEl.classList.add("hidden");
+  const statReadTime = $("statReadTime"); if (statReadTime) statReadTime.textContent = "";
+  const statMatch = $("statMatch"); if (statMatch) statMatch.textContent = "";
+  const statTrending = $("statTrending"); if (statTrending) statTrending.classList.add("hidden");
+  renderQueue();
 }
 
 function slideCardIn(card) {
@@ -774,6 +794,22 @@ async function refreshRecommendations(mode = null) {
       endLoading();
     }
   }
+  // An empty batch would otherwise strand the user permanently: no
+  // currentItem() means every button and keyboard shortcut becomes a
+  // silent no-op against a stale card that's still on screen (exactly
+  // "after a few cards, nothing responds any more") since currentIndex
+  // never comes back in range on its own. Most common cause is a thin
+  // candidate pool -- a category/mood filter plus a session's worth of
+  // "already seen" exclusions narrowing it down -- so fall back to the
+  // unfiltered trending pool, which isn't subject to that narrowing,
+  // instead of leaving the user stranded.
+  if (!recommendations.length && mode !== "trending") {
+    showToast("Ran out of articles for this filter — showing trending instead.", "info", 3000);
+    activeCategoryFilter = null;
+    syncSidebarHighlight();
+    return refreshRecommendations("trending");
+  }
+
   queue = recommendations;
   currentIndex = 0;
   paintCard();
