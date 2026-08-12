@@ -983,6 +983,18 @@ button:active { filter: brightness(0.9); transform: scale(0.96); }
   animation: toast-out 200ms ease forwards;
 }
 
+/* A repeat of the same message bumps this instead of stacking a
+   duplicate toast — a brief scale pulse instead of showing the same
+   text twice. */
+.toast.toast-flash {
+  animation: toast-flash 260ms ease;
+}
+@keyframes toast-flash {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.035); }
+  100% { transform: scale(1); }
+}
+
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }

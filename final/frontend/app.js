@@ -51,14 +51,35 @@ const $ = (id) => document.getElementById(id);
 function showToast(message, kind = "info", duration = 3200) {
   const stack = $("toastStack");
   if (!stack) return;
+
+  // A cold/waking-up backend can make several actions fail in a short
+  // window (each one's own request timing out around the same time),
+  // which used to pile up a wall of identical "couldn't save that
+  // action" toasts — confusing and not more informative than just one.
+  // Bump the existing one's lifetime instead of stacking a duplicate.
+  const existing = Array.from(stack.querySelectorAll(".toast:not(.toast-out)"))
+    .find((t) => t.dataset.message === message);
+  if (existing) {
+    clearTimeout(Number(existing.dataset.timer));
+    existing.dataset.timer = String(setTimeout(() => {
+      existing.classList.add("toast-out");
+      setTimeout(() => existing.remove(), 200);
+    }, duration));
+    existing.classList.remove("toast-flash");
+    void existing.offsetWidth;
+    existing.classList.add("toast-flash");
+    return;
+  }
+
   const el = document.createElement("div");
   el.className = `toast toast-${kind}`;
   el.textContent = message;
+  el.dataset.message = message;
   stack.appendChild(el);
-  setTimeout(() => {
+  el.dataset.timer = String(setTimeout(() => {
     el.classList.add("toast-out");
     setTimeout(() => el.remove(), 200);
-  }, duration);
+  }, duration));
 }
 
 // ─── Loading bar ────────────────────────────────────────────
@@ -83,7 +104,7 @@ function endLoading() {
 
 // ─── Network helpers ──────────────────────────────────────────
 
-async function request(method, path, body, timeoutMs = 60000) {
+async function request(method, path, body, timeoutMs = 60000, _retried = false) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem('token');
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -105,13 +126,25 @@ async function request(method, path, body, timeoutMs = 60000) {
       signal: controller.signal,
     });
   } catch (e) {
+    clearTimeout(timer);
+    // A network-level failure (unreachable / timed out, not an HTTP error
+    // response) right after a period of inactivity is the exact signature
+    // of a still-waking-up backend, not a real failure — one retry a few
+    // seconds later self-heals most of these instead of surfacing an
+    // error for something that would've worked moments afterward anyway.
+    // Only ever retries once (`_retried` guards against looping) and only
+    // for this network-failure case, never for a real HTTP error status
+    // below (4xx/5xx got an actual response, so retrying won't help).
+    if (!_retried) {
+      await new Promise((r) => setTimeout(r, 2500));
+      return request(method, path, body, timeoutMs, true);
+    }
     if (e.name === "AbortError") {
       throw new Error("The server is taking a while to respond (it may be waking up from idle) — please try again.");
     }
     throw e;
-  } finally {
-    clearTimeout(timer);
   }
+  clearTimeout(timer);
 
   if (!res.ok) {
     const text = await res.text();
@@ -131,11 +164,32 @@ const patch = (path, body) => request("PATCH", path, body);
 // a couple of reads used to skip this (harmless for guests, since the
 // backend lets a tokenless request through, but inconsistent for a
 // logged-in user who has a token to send).
-async function authGet(path) {
+async function authGet(path, timeoutMs = 60000, _retried = false) {
   const headers = {};
   const token = localStorage.getItem('token');
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${api}${path}`, { headers });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(`${api}${path}`, { headers, signal: controller.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    // Same reasoning as request()'s retry -- a network-level failure here
+    // is almost always a still-waking-up backend, not a real error.
+    if (!_retried) {
+      await new Promise((r) => setTimeout(r, 2500));
+      return authGet(path, timeoutMs, true);
+    }
+    if (e.name === "AbortError") {
+      throw new Error("The server is taking a while to respond (it may be waking up from idle) — please try again.");
+    }
+    throw e;
+  }
+  clearTimeout(timer);
+
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
