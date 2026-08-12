@@ -14,7 +14,6 @@ alongside the DDQN checkpoint.
 """
 from __future__ import annotations
 
-import json
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np

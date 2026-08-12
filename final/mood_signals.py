@@ -24,7 +24,6 @@ Two pieces, same shape as everything else time-sensitive in this codebase
 """
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 
 # category -> affinity in [0, 1]; unlisted categories default to neutral

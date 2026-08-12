@@ -384,7 +384,8 @@ def health():
             inter_count  = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
             graph_count  = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
         db_ok = True
-    except Exception as exc:
+    except Exception:
+        logger.exception("Health check: DB query failed")
         news_count = user_count = inter_count = graph_count = 0
         db_ok = False
 

@@ -16,7 +16,7 @@ import logging
 import math
 import re
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -190,7 +190,6 @@ class EnhancedNLPEngine:
             from sklearn.metrics.pairwise import cosine_similarity
             from sklearn.preprocessing import normalize
 
-            candidate_set = set(candidate_ids)
             indices = [
                 self._doc_id_to_idx[nid]
                 for nid in candidate_ids

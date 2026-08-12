@@ -276,7 +276,6 @@ def _draw_overlays(frame: np.ndarray, face_landmarks, x_min, y_min, x_max, y_max
 def _attention_loop(camera_index: int, show_window: bool):
     global LATEST, LATEST_FRAME
     logger.info("Camera thread started")
-    mp_face_mesh = mp.solutions.face_mesh
 
     face_mesh = mp.solutions.face_mesh.FaceMesh(
     max_num_faces=1,
@@ -317,8 +316,6 @@ def _attention_loop(camera_index: int, show_window: bool):
     prev_gray = None
     prev_iris_pos: tuple[float, float] | None = None
     prev_face_center: tuple[float, float] | None = None
-    face_detected_start: float | None = None
-    focus_time = 0.0
     frame_count = 0
 
     while not _STOP_EVENT.is_set():
@@ -362,13 +359,11 @@ def _attention_loop(camera_index: int, show_window: bool):
             eye_openness, ear_val = compute_eye_openness(frame, face_landmarks)
             movement = compute_movement(prev_gray, gray)
             energy, gaze, total_score = compute_scores(brightness, eye_openness, movement)
-            vfas = compute_vfas(brightness, eye_openness, movement)
 
-            # Focus time
-            if face_detected_start is None:
-                face_detected_start = time.time()
-            focus_time = time.time() - face_detected_start
-            # 🔥 FIXED ATTENTION (REAL-TIME, NOT TIME-BIASED)
+            # Real-time attention, not time-biased — no running "focus
+            # time" fed in here on purpose (an earlier version tracked and
+            # used one; removed since a face detected 10 minutes ago
+            # shouldn't score higher than one detected 10 seconds ago).
             attention_score = compute_attention_score(energy, gaze)
             normalized_attention = float(np.clip(attention_score, 0.0, 1.0))
 
@@ -438,8 +433,6 @@ def _attention_loop(camera_index: int, show_window: bool):
                 "state": state,
             })
         else:
-            face_detected_start = None
-            focus_time = 0.0
             prev_iris_pos = None
             prev_face_center = None
             with _SNAPSHOT_LOCK:

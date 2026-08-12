@@ -11,7 +11,6 @@ import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import json
 
 from config import get_settings
 
