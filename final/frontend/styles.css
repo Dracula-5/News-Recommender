@@ -34,6 +34,17 @@
 
 html { scroll-behavior: smooth; }
 
+/* ── Keyboard focus ────────────────────────────────────────── */
+/* :focus-visible (not :focus) so this only shows for keyboard/assistive
+   navigation, not every mouse click — buttons/links have no custom focus
+   style otherwise and would fall back to the browser's default blue ring,
+   which works but clashes with the theme. Inputs/selects keep their own
+   border-color focus treatment below. */
+a:focus-visible, button:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}
+
 body {
   min-height: 100vh;
   background: var(--bg);
@@ -122,8 +133,35 @@ body {
 .sidebar-link.active .sidebar-link-dot { opacity: 1; }
 
 @media (max-width: 900px) {
+  /* No room for a fixed side column below this width — the sidebar
+     becomes a horizontal scrollable strip above the feed instead of
+     disappearing outright, so category browsing isn't desktop-only. */
   .app-layout { display: block; padding: 0; }
-  .sidebar { display: none !important; }
+  .sidebar {
+    position: static;
+    width: auto;
+    margin: 0;
+    border-radius: 0;
+    border-width: 0 0 1px;
+    box-shadow: none;
+  }
+  .sidebar-brand { display: none; } /* redundant with the masthead wordmark right below it */
+  .sidebar-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 6px;
+    padding: 2px 16px 12px;
+    scroll-snap-type: x proximity;
+  }
+  .sidebar-link {
+    flex: 0 0 auto;
+    scroll-snap-align: start;
+    border-radius: 100px;
+    border: 1px solid var(--border2);
+    padding: 6px 13px;
+  }
+  .sidebar-link:hover, .sidebar-link:active { transform: none; }
+  .sidebar-link.active { border-color: var(--red); }
 }
 
 /* ── Shell ─────────────────────────────────────────────────── */

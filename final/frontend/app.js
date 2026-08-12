@@ -793,7 +793,13 @@ async function sendFeedback(liked, skipped = 0, automatic = false, forceTrending
   }
 
   if (currentIndex >= queue.length || forceTrending || currentIndex % 3 === 0) {
-    await refreshRecommendations(forceTrending ? "trending" : null);
+    try {
+      await refreshRecommendations(forceTrending ? "trending" : null);
+    } catch (e) {
+      // refreshRecommendations() already surfaced a toast — this is just
+      // here so a network hiccup at exactly this moment doesn't surface
+      // as an unhandled promise rejection from every like/skip/next click.
+    }
   } else {
     paintCard();
   }
