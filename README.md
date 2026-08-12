@@ -442,10 +442,20 @@ Full interactive docs at `/docs` once the server is running.
 
 ## Known limitations
 
-- The webcam attention pipeline needs a physical camera on the host; it's
-  disabled by default in Docker (`NEUROFEED_ENABLE_WEBCAM_ATTENTION=false`)
-  since containers don't get camera passthrough, and degrades gracefully
-  to a "no face detected" state either way.
+- Webcam attention capture is **server-side** (`cv2.VideoCapture` on
+  whatever machine runs the backend process), not the browser's own
+  camera — there's no `getUserMedia` involved. This works well for local
+  use (your machine's camera, running the backend yourself) but means it
+  can never function for real visitors on a cloud deployment like Render,
+  which has no physical camera attached at all. `POST /attention/start`
+  checks `NEUROFEED_ENABLE_WEBCAM_ATTENTION` and returns a clean
+  `"disabled"` status instead of probing hardware that can't exist there
+  (disabled by default in Docker and in production for this reason), and
+  the recommender degrades gracefully to a "no face detected" attention
+  state either way. Making this actually work per-visitor on a cloud
+  deployment would mean moving capture into the browser (e.g. a JS/WASM
+  face/gaze model streaming a computed score to the backend instead of
+  raw video) — a real rework, not a config change.
 - The bundled dataset is synthetic (see above) — lexically coherent
   enough for BM25/TF-IDF/LSA to do real work, but not real news.
 - The in-memory cache and rate limiter are single-process by design

@@ -798,6 +798,14 @@ async def attention_stream():
 
 @app.post("/attention/start")
 def start_attention():
+    # Webcam capture is server-side (cv2.VideoCapture on whatever machine
+    # runs this process) — on a cloud host like Render there's no physical
+    # camera at all, so without this check every single visitor's page
+    # load would trigger a real hardware probe (opening/reading/releasing
+    # camera indices 0-2) that can never succeed. Short-circuit instead of
+    # paying that cost for nothing every time.
+    if not settings.enable_webcam_attention:
+        return {"status": "disabled", "message": "Webcam attention is disabled on this deployment"}
     return start_background_attention()
 
 
