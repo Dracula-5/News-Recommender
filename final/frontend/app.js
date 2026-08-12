@@ -436,10 +436,21 @@ function openTrendingArticle(article) {
 let attentionCaptureActive = false;
 
 async function startAttentionCapture() {
+  // Attention capture opens a camera on whatever machine runs the *backend*
+  // process (server-side OpenCV, not the browser's own camera) — on this
+  // deployment that's a cloud host with no camera attached, so the
+  // request itself always succeeds (HTTP 200) but its `status` field says
+  // it didn't actually start anything. A prior version only checked for a
+  // thrown request error here, so it marked capture "active" even on a
+  // clean "disabled"/"camera_unavailable" response — silently wrong.
   try {
-    await post("/attention/start", {});
-    attentionCaptureActive = true;
-  } catch (e) { attentionCaptureActive = false; /* no camera available — fall back silently */ }
+    const data = await post("/attention/start", {});
+    attentionCaptureActive = data?.status === "started" || data?.status === "already_running";
+    return data;
+  } catch (e) {
+    attentionCaptureActive = false;
+    return null;
+  }
 }
 
 async function stopAttentionCapture() {
@@ -553,6 +564,19 @@ function paintCardContent(item) {
     ? item.full_article.split(".")[0]
     : item.abstract || item.news_id;
   $("abstract").textContent = item.abstract || item.full_article || "No summary available.";
+
+  // Stats row — real article metadata, not invented engagement numbers.
+  // ~200 wpm is a standard average adult reading speed estimate.
+  const minutes = Math.max(1, Math.round(Number(item.article_length || 0) / 200));
+  const readTimeEl = $("statReadTime");
+  if (readTimeEl) readTimeEl.textContent = `${minutes} min read`;
+
+  const matchPct = Math.round(Math.max(0, Math.min(1, Number(item.score) || 0)) * 100);
+  const matchEl = $("statMatch");
+  if (matchEl) matchEl.textContent = `${matchPct}% match`;
+
+  const trendingEl = $("statTrending");
+  if (trendingEl) trendingEl.classList.toggle("hidden", !(Number(item.trending) > 0.5));
 
   const urlEl = $("url");
   if (item.url) { urlEl.classList.remove("hidden"); urlEl.href = item.url; }
@@ -1014,15 +1038,21 @@ async function saveSettings() {
       exploration_preference: exploration,
     });
 
+    let attentionUnavailable = false;
     if (wantsAttention && !attentionCaptureActive) {
-      await startAttentionCapture();
+      const result = await startAttentionCapture();
+      attentionUnavailable = !attentionCaptureActive && result != null;
     } else if (!wantsAttention && attentionCaptureActive) {
       await stopAttentionCapture();
     }
 
     await loadUserInfo(userId);
     closeSettings();
-    showToast("Settings saved.", "success");
+    if (attentionUnavailable) {
+      showToast("Settings saved — attention tracking isn't available in this environment (no camera on this deployment).", "info", 4500);
+    } else {
+      showToast("Settings saved.", "success");
+    }
   } catch (e) {
     console.warn("saveSettings:", e);
     showToast("Couldn't save settings — please try again.", "error");

@@ -128,24 +128,37 @@
           <div class="trending-row" id="trendingRow"></div>
         </section>
 
-        <!-- HERO ARTICLE — image, headline and content unified in one card -->
+        <!-- HERO ARTICLE — immersive full-bleed card: headline/excerpt/stats
+             overlaid on the image via a bottom scrim, actions in a solid
+             footer strip below (buttons need real contrast, not a busy
+             gradient background). -->
         <article class="hero-article" id="card">
           <div class="hero-visual" id="heroVisual">
+            <div class="hero-scrim"></div>
             <span class="live-badge"><span class="live-dot"></span>LIVE</span>
             <span class="hero-cat-watermark" id="heroWatermark">News</span>
+
+            <div class="hero-overlay">
+              <span id="category" class="hero-badge">Category</span>
+              <h1 id="headline">Ready when you are.</h1>
+
+              <div class="byline-row">
+                <span class="byline">NEUROFEED DESK</span>
+                <span class="byline-sep">·</span>
+                <span id="readTimer" class="byline-timer">just now</span>
+              </div>
+
+              <p id="abstract">Open your feed to get your first recommendation.</p>
+
+              <div class="hero-stats" id="heroStats">
+                <span class="hero-stat"><span class="hero-stat-icon">⏱</span><span id="statReadTime">– min read</span></span>
+                <span class="hero-stat"><span class="hero-stat-icon">🎯</span><span id="statMatch">– match</span></span>
+                <span class="hero-stat hero-stat-trending hidden" id="statTrending"><span class="hero-stat-icon">🔥</span>Trending</span>
+              </div>
+            </div>
           </div>
 
-          <div class="hero-body">
-            <span id="category" class="chip-category">Category</span>
-            <h1 id="headline">Ready when you are.</h1>
-
-            <div class="byline-row">
-              <span class="byline">NEUROFEED DESK</span>
-              <span class="byline-sep">·</span>
-              <span id="readTimer" class="byline-timer">just now</span>
-            </div>
-
-            <p id="abstract">Open your feed to get your first recommendation.</p>
+          <div class="hero-footer">
             <a id="url" href="#" target="_blank" rel="noreferrer" class="read-link hidden">Read full article ↗</a>
 
             <!-- Inline poll — appears after a while if attention drops -->
